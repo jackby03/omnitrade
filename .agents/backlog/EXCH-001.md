@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | `TODO` |
+| Status | `DONE` |
 | Phase | 2 |
 | Crate | `omnitrade-exchange` |
 | Target | `src/error.rs`, `src/traits.rs` |
@@ -38,12 +38,12 @@ Define the foundational traits and error types for all exchange connectors. This
 
 ## Acceptance Criteria
 
-- [ ] `ExchangeError` implements `std::error::Error` and `Display`
-- [ ] `ExchangeStream` is object-safe and usable as `Box<dyn ExchangeStream>`
-- [ ] `DepthUpdate` derives `Debug`, `Clone`, `PartialEq`
-- [ ] Unit tests verify error `Display` formatting
-- [ ] All items have `///` doc comments
-- [ ] File stays under 250 lines
+- [x] `ExchangeError` implements `std::error::Error` and `Display`
+- [x] `ExchangeStream` is object-safe and usable as `Box<dyn ExchangeStream>`
+- [x] `DepthUpdate` derives `Debug`, `Clone`, `PartialEq`
+- [x] Unit tests verify error `Display` formatting
+- [x] All items have `///` doc comments
+- [x] File stays under 250 lines
 
 ## Cargo Dependencies
 
