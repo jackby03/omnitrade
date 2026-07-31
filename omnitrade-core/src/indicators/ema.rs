@@ -26,6 +26,7 @@ use crate::CoreError;
 /// let first = ema.update(6.0); // Seeded from SMA(2,4,6) = 4.0
 /// assert!(first.is_some());
 /// ```
+#[derive(Debug)]
 pub struct Ema {
     period: usize,
     multiplier: f64,
@@ -188,7 +189,9 @@ mod tests {
     #[test]
     fn ema_known_sequence() {
         // Verify EMA(10) against a manually computed sequence.
-        let prices = [22.27, 22.19, 22.08, 22.17, 22.18, 22.13, 22.23, 22.43, 22.24, 22.29, 22.15];
+        let prices = [
+            22.27, 22.19, 22.08, 22.17, 22.18, 22.13, 22.23, 22.43, 22.24, 22.29, 22.15,
+        ];
         let mut ema = Ema::new(10).expect("valid period");
 
         let mut last_val = None;

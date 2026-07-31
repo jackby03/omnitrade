@@ -23,6 +23,7 @@ use crate::CoreError;
 /// // Population std dev of [2, 4, 6] = sqrt(8/3) ≈ 1.6329931618...
 /// assert!((v - 1.6329931618).abs() < 1e-6);
 /// ```
+#[derive(Debug)]
 pub struct Volatility {
     period: usize,
     /// Circular buffer of values.
@@ -227,8 +228,7 @@ mod tests {
                 let start = i.saturating_sub(3);
                 let window = &values[start..=i];
                 let expected = reference_std_dev(window);
-                assert_relative_eq!(result, expected, epsilon = 1e-8,
-                    "Mismatch at index {i}: got {result}, expected {expected}");
+                assert_relative_eq!(result, expected, epsilon = 1e-8);
             }
         }
     }

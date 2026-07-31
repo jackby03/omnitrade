@@ -22,6 +22,7 @@ use crate::CoreError;
 /// assert_eq!(sma.update(3.0), Some(2.0)); // (1+2+3)/3 = 2.0
 /// assert_eq!(sma.update(4.0), Some(3.0)); // (2+3+4)/3 = 3.0
 /// ```
+#[derive(Debug)]
 pub struct Sma {
     period: usize,
     /// Circular buffer storing the last `period` values.
@@ -158,7 +159,7 @@ mod tests {
         // Prices: 44, 44.34, 44.09, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84
         // SMA(5): -, -, -, -, 44.074, 44.242, 44.392, 44.658, 45.044
         let prices = [44.0, 44.34, 44.09, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84];
-        let expected = [44.074, 44.242, 44.392, 44.658, 45.044];
+        let expected = [44.074, 44.24, 44.392, 44.658, 45.104];
 
         let mut sma = Sma::new(5).expect("valid period");
         let mut results = Vec::new();

@@ -44,7 +44,10 @@ impl<T: Default + Copy, const N: usize> RingBuffer<T, N> {
     /// Bitmask for wrapping indices. Equal to `N - 1` when `N` is a power of two.
     const MASK: usize = {
         assert!(N > 0, "RingBuffer capacity must be greater than zero");
-        assert!(N & (N - 1) == 0, "RingBuffer capacity must be a power of two");
+        assert!(
+            N & (N - 1) == 0,
+            "RingBuffer capacity must be a power of two"
+        );
         N - 1
     };
 

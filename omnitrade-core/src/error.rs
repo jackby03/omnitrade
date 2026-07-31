@@ -7,7 +7,7 @@
 use thiserror::Error;
 
 /// Errors produced by `omnitrade-core` operations.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error, Clone, PartialEq)]
 pub enum CoreError {
     /// An indicator or buffer was constructed with an invalid period.
     #[error("invalid period: {0} (must be greater than zero)")]

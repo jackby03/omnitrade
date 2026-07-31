@@ -39,6 +39,7 @@ use crate::CoreError;
 /// }
 /// assert!(result.is_some());
 /// ```
+#[derive(Debug)]
 pub struct Rsi {
     period: usize,
     /// Previous price (needed to compute the change).

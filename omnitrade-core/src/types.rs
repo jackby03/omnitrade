@@ -194,10 +194,7 @@ impl Order {
     /// Returns `true` if the order is still active (New or PartiallyFilled).
     #[inline]
     pub fn is_active(&self) -> bool {
-        matches!(
-            self.status,
-            OrderStatus::New | OrderStatus::PartiallyFilled
-        )
+        matches!(self.status, OrderStatus::New | OrderStatus::PartiallyFilled)
     }
 }
 
@@ -303,7 +300,11 @@ mod tests {
 
     #[test]
     fn order_terminal_states() {
-        for status in [OrderStatus::Filled, OrderStatus::Cancelled, OrderStatus::Rejected] {
+        for status in [
+            OrderStatus::Filled,
+            OrderStatus::Cancelled,
+            OrderStatus::Rejected,
+        ] {
             let order = Order {
                 id: 1,
                 symbol: "ETHUSDT".into(),
