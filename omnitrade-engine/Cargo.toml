@@ -1,0 +1,11 @@
+[package]
+name = "omnitrade-engine"
+version = "0.1.0"
+description = "Order matching engine, paper trading, and portfolio state management"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+omnitrade-core = { path = "../omnitrade-core" }

@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "omnitrade-core",
+    "omnitrade-exchange",
+    "omnitrade-engine",
+    "omnitrade-script",
+    "omnitrade-cli",
+    "omnitrade-ui",
+]
+
+[workspace.package]
+edition = "2021"
+license = "AGPL-3.0-or-later"
+rust-version = "1.75"
+repository = "https://github.com/jackby03/omnitrade"

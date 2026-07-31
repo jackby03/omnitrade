@@ -1,0 +1,12 @@
+[package]
+name = "omnitrade-ui"
+version = "0.1.0"
+description = "GPU-accelerated desktop GUI built with egui and egui_tiles"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+omnitrade-core = { path = "../omnitrade-core" }
+omnitrade-engine = { path = "../omnitrade-engine" }

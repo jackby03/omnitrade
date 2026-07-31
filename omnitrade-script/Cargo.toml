@@ -1,0 +1,11 @@
+[package]
+name = "omnitrade-script"
+version = "0.1.0"
+description = "Strategy DSL interpreter with lexer, AST parser, and evaluator"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+omnitrade-core = { path = "../omnitrade-core" }

@@ -1,0 +1,18 @@
+[package]
+name = "omnitrade-core"
+version = "0.1.0"
+description = "Domain types, safe RingBuffer, and technical analysis indicators for omnitrade"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror = "2"
+
+[features]
+default = ["std"]
+std = []
+
+[dev-dependencies]
+approx = "0.5"

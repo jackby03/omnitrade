@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lockfile (workspace crates use exact versions)
+Cargo.lock
+
+# IDE / editor
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# OS keystore artifacts (never commit credentials)
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
