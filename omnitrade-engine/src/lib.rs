@@ -11,7 +11,11 @@
 //! crate and communicates via message channels (`tokio::sync::broadcast/mpsc`).
 
 pub mod error;
+pub mod fees;
 pub mod fill;
+pub mod orderbook;
 
 pub use error::EngineError;
+pub use fees::{FeeSchedule, SlippageModel};
 pub use fill::{OrderFill, OrderFillBuilder};
+pub use orderbook::L2OrderBook;
