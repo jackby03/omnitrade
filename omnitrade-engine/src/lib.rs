@@ -9,7 +9,9 @@
 //!
 //! The engine operates completely headless — it has no dependency on the UI
 //! crate and communicates via message channels (`tokio::sync::broadcast/mpsc`).
-//!
-//! ## Status
-//!
-//! **Phase 3** — Not yet implemented. This is a placeholder crate.
+
+pub mod error;
+pub mod fill;
+
+pub use error::EngineError;
+pub use fill::{OrderFill, OrderFillBuilder};
