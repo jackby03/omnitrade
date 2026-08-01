@@ -10,12 +10,14 @@
 //! The engine operates completely headless — it has no dependency on the UI
 //! crate and communicates via message channels (`tokio::sync::broadcast/mpsc`).
 
+pub mod account;
 pub mod error;
 pub mod fees;
 pub mod fill;
 pub mod matching;
 pub mod orderbook;
 
+pub use account::AccountState;
 pub use error::EngineError;
 pub use fees::{FeeSchedule, SlippageModel};
 pub use fill::{OrderFill, OrderFillBuilder};
