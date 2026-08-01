@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | `TODO` |
+| Status | `DONE` |
 | Phase | 2 |
 | Crate | `omnitrade-exchange` |
 | Target | `src/binance/connection.rs` |
@@ -34,11 +34,11 @@ Resilient WebSocket connection manager for Binance streams. Handles connection l
 
 ## Acceptance Criteria
 
-- [ ] `ConnectionState` transitions are tested (Disconnected → Connecting → Connected)
-- [ ] Backoff calculation logic is unit-tested (1, 2, 4, 8, 16, 30, 30, 30...)
-- [ ] `add_stream` correctly builds the combined URL
-- [ ] No `.unwrap()` or `.expect()` in production code
-- [ ] Uses `tracing` for structured logging (not `println!`)
+- [x] `ConnectionState` transitions are tested (Disconnected → Connecting → Connected)
+- [x] Backoff calculation logic is unit-tested (1, 2, 4, 8, 16, 30, 30, 30...)
+- [x] `add_stream` correctly builds the combined URL
+- [x] No `.unwrap()` or `.expect()` in production code
+- [x] Uses `tracing` for structured logging (not `println!`)
 
 ## Cargo Dependencies
 

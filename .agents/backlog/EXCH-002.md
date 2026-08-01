@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | `TODO` |
+| Status | `DONE` |
 | Phase | 2 |
 | Crate | `omnitrade-exchange` |
 | Target | `src/binance/dto.rs` |
@@ -35,12 +35,12 @@ Serde Data Transfer Objects for Binance WebSocket stream payloads. These structs
 
 ## Acceptance Criteria
 
-- [ ] `BinanceKlineEvent` deserializes from a raw JSON string matching Binance docs
-- [ ] `BinanceDepthEvent` deserializes from a raw JSON string matching Binance docs
-- [ ] `TryFrom<BinanceKlineEvent>` produces a valid `Candle` with correct field mapping
-- [ ] `TryFrom<BinanceDepthEvent>` produces a valid `DepthUpdate`
-- [ ] Malformed JSON returns `Err`, not a panic
-- [ ] Unit tests use static `&str` payloads (no network calls)
+- [x] `BinanceKlineEvent` deserializes from a raw JSON string matching Binance docs
+- [x] `BinanceDepthEvent` deserializes from a raw JSON string matching Binance docs
+- [x] `TryFrom<BinanceKlineEvent>` produces a valid `Candle` with correct field mapping
+- [x] `TryFrom<BinanceDepthEvent>` produces a valid `DepthUpdate`
+- [x] Malformed JSON returns `Err`, not a panic
+- [x] Unit tests use static `&str` payloads (no network calls)
 
 ## Cargo Dependencies
 

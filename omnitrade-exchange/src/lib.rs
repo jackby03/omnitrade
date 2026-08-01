@@ -16,6 +16,7 @@
 //!
 //! **Phase 2 (In Progress)**: `EXCH-001` core traits and errors completed.
 
+pub mod binance;
 pub mod error;
 pub mod traits;
 
