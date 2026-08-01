@@ -13,9 +13,11 @@
 pub mod error;
 pub mod fees;
 pub mod fill;
+pub mod matching;
 pub mod orderbook;
 
 pub use error::EngineError;
 pub use fees::{FeeSchedule, SlippageModel};
 pub use fill::{OrderFill, OrderFillBuilder};
+pub use matching::MatchingEngine;
 pub use orderbook::L2OrderBook;
