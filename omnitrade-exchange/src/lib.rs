@@ -14,11 +14,12 @@
 //!
 //! ## Status
 //!
-//! **Phase 2 (In Progress)**: `EXCH-001` core traits and errors completed.
+//! **Phase 2 (Done)**: `EXCH-001` through `EXCH-005` completed.
 
 pub mod binance;
 pub mod error;
 pub mod traits;
 
+pub use binance::BinanceClient;
 pub use error::ExchangeError;
 pub use traits::{DepthUpdate, ExchangeInfo, ExchangeStream};

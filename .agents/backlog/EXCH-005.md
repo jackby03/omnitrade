@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | `TODO` |
+| Status | `DONE` |
 | Phase | 2 |
 | Crate | `omnitrade-exchange` |
 | Target | `src/lib.rs`, `src/binance/mod.rs` |
@@ -41,10 +41,10 @@ Wire all exchange modules together and implement the `BinanceClient` facade that
 
 ## Acceptance Criteria
 
-- [ ] `BinanceClient` implements `ExchangeStream`
-- [ ] `BinanceClient` implements `ExchangeInfo`
-- [ ] `lib.rs` compiles and re-exports all public types
-- [ ] All public items have `///` doc comments
+- [x] `BinanceClient` implements `ExchangeStream`
+- [x] `BinanceClient` implements `ExchangeInfo`
+- [x] `lib.rs` compiles and re-exports all public types
+- [x] All public items have `///` doc comments
 
 ## Cargo Dependencies
 
