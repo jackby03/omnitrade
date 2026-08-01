@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | `TODO` |
+| Status | `DONE` |
 | Phase | 2 |
 | Crate | `omnitrade-exchange` |
 | Target | `src/binance/router.rs` |
@@ -29,12 +29,12 @@ Message routing layer that receives raw JSON strings from the `BinanceConnection
 
 ## Acceptance Criteria
 
-- [ ] Valid kline JSON is routed to the correct candle sender
-- [ ] Valid depth JSON is routed to the correct depth sender
-- [ ] Unknown event types are logged and skipped (no panic)
-- [ ] Malformed JSON is logged and skipped (no panic)
-- [ ] Channel registration returns a working `Receiver`
-- [ ] Unit tests use static JSON payloads (no network)
+- [x] Valid kline JSON is routed to the correct candle sender
+- [x] Valid depth JSON is routed to the correct depth sender
+- [x] Unknown event types are logged and skipped (no panic)
+- [x] Malformed JSON is logged and skipped (no panic)
+- [x] Channel registration returns a working `Receiver`
+- [x] Unit tests use static JSON payloads (no network)
 
 ## Cargo Dependencies
 
