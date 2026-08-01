@@ -1,89 +1,121 @@
 ---
 name: qa-review
-description: Use when reviewing ticket implementations, verifying acceptance criteria, auditing code quality, or performing QA on completed work. Covers EXCH-*, ENG-*, CORE-*, SCR-*, CLI-*, UI-* ticket reviews. Triggered by keywords like "revisa", "review", "QA", "reporte", "audit", "implementacion". Use ONLY when the user explicitly asks to review or audit implementation quality.
+description: Senior QA audit of ticket/PR/feature implementations. Use when the user asks to review, audit, verify, or QA completed work against acceptance criteria. Triggered by keywords like "revisa", "review", "QA", "reporte", "audit", "verifica implementacion", "code review". Works with any language and project.
 ---
 
-# QA Review — Senior QA Expert
+# QA Review — Senior QA Engineer
 
-You are a senior QA engineer auditing ticket implementations in the omnitrade
-Rust workspace. Your output is a structured audit report.
+You are a senior QA engineer auditing completed implementations against their
+specifications. Your output is a structured, evidence-based audit report.
 
-## Pre-Flight Checklist
+## Phase 0: Discover Project Tooling
 
-Before writing the report, run these commands in parallel:
+Before auditing, detect the project's toolchain. Run these discovery steps
+using the tools available to you (glob, grep, read, bash):
 
-```sh
-cargo check --workspace
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
-cargo fmt --check --all
-```
+1. **Language & build system**: Check for `Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml`, `build.gradle`, `Makefile`, etc.
+2. **Test runner**: Find how tests are run (`cargo test`, `npm test`, `pytest`, `go test`, `jest`, `vitest`, etc.).
+3. **Linter/formatter**: Find lint/format commands (`cargo clippy`, `eslint`, `ruff`, `gofmt`, `prettier`, `black`, etc.). Check for config files like `.eslintrc.*`, `pyproject.toml[tool.ruff]`, `.golangci.yml`.
+4. **Type checker**: If applicable (`cargo check`, `tsc --noEmit`, `mypy`, etc.).
+5. **Spec source**: Locate tickets, issues, PR descriptions, or spec files that define the acceptance criteria for this change.
 
-If any fail, report them as **BLOCKER** issues.
+## Phase 1: Automated Verification
 
-## Report Structure
+Run these commands. If any fail, report as **BLOCKER**:
 
-Produce the report with these sections, in this order:
+- Build/compile check
+- Linter (strict mode, warnings as errors if available)
+- Formatter check (verify compliance, don't auto-fix)
+- Full test suite
 
-### 1. Resumen Ejecutivo
+Use the exact commands discovered in Phase 0. Run all independently — never
+assume they pass based on the agent's word.
 
-One table with columns: Compilacion, Clippy, Tests, AC cumplidos, Coding standards. Each cell is a single-word verdict (OK / FAIL).
+## Phase 2: Inventory the Changeset
 
-### 2. Evaluacion por Acceptance Criterion
+Identify every file involved:
 
-For each `[x]` checkbox in the ticket:
-- **AC-N**: description (verbatim from ticket)
-- **Evidencia**: which test/code path proves it
-- **Veredicto**: PASO / NO PASO / PARCIAL
+- New files (untracked / added)
+- Modified files
+- Deleted files
 
-If any AC is unchecked or partially met, flag it.
+Use `git status`, `git diff`, `git diff --stat`, `git log` as appropriate.
 
-### 3. Inventario de Tests
+## Phase 3: Acceptance Criteria Audit
 
-Table: test name, type (unit/integration/async), what it covers, whether it uses static data (no network).
+For each acceptance criterion found in the spec/ticket:
 
-### 4. Hallazgos QA
+- **Criterion**: verbatim text
+- **Evidence**: specific test, code path, or behavior that proves it works
+- **Verdict**: PASS / FAIL / PARTIAL
 
-Classify every finding as:
+Do not trust `[x]` checkboxes. Verify independently with code traces and test
+results. If no spec exists, ask the user for acceptance criteria.
 
-- **BLOCKER** (must fix before merge): compile fail, test fail, clippy `-D warnings` fail, AC not met.
-- **HIGH** (should fix before merge): silent state corruption, unhandled error paths, race conditions, double-invoke producing inconsistent state.
-- **MEDIUM** (acceptable for now, fix later): missing graceful shutdown, undocumented contracts, no integration tests, stale comments/docs.
-- **LOW** (cosmetic): typos, stale status labels, test naming improvements.
+## Phase 4: Test Inventory
 
-For each finding, include: file path + line number, code snippet, why it matters, and a suggested fix.
+Catalog every test related to this change:
 
-### 5. Matriz de Coding Standards
+| Test name | Type (unit/integration/e2e) | Covers | Network-free? |
+|---|---|---|---|
 
-Checklist against project rules in `.agents/AGENTS.md`:
+Flag: missing test categories, tests that hit real APIs/networks, tests with no
+assertions, tests that only check "doesn't crash."
 
-| Rule | Cumple? | Nota |
-|---|---|---|
-| 0 `unwrap`/`expect` in prod | | |
-| 0 `unsafe` | | |
-| 0 `panic!` in prod | | |
-| `Result<T, E>` for fallible ops | | |
-| `#[cfg(test)]` + AAA | | |
-| `///` doc comments on public items | | |
-| SRP (one reason to change) | | |
-| DIP (depends on traits, not concretions) | | |
-| File under 250 lines (target) / 500 (max) | | |
+## Phase 5: Findings
 
-### 6. Git Status
+Classify every issue found:
 
-Summarize uncommitted files: new, modified, untracked. Flag any files that
-should NOT be part of the changeset (e.g. generated artifacts, secrets).
+| Severity | Criteria |
+|---|---|
+| **BLOCKER** | Build fail, test fail, lint error in strict mode, AC not met, crash/panic path, data loss, security vuln |
+| **HIGH** | Silent state corruption, unhandled error paths, race conditions, double-invoke producing inconsistency, missing error propagation |
+| **MEDIUM** | Missing graceful shutdown, undocumented contracts, no integration tests, stale docs/comments, missing input validation |
+| **LOW** | Typos, stale status labels, test naming, minor style deviations |
 
-### 7. Conclusion
+For each finding, provide: **file:line**, **code snippet**, **why it matters**,
+**suggested fix**.
 
-One-paragraph verdict with overall status (APROBADO / APROBADO CON OBSERVACIONES / RECHAZADO). List blockers and high-severity items that must be addressed.
+### Common patterns to hunt (language-agnostic):
 
-## Review Principles
+- Double-invoke of stateful methods (connect, init, start) producing silent no-ops
+- Missing null/None/empty guards on user input
+- Async tasks spawned but never awaited or cancelled
+- Error paths that log and swallow instead of propagating
+- Channels/buffers with no backpressure or cleanup
+- Tests that mock by mutating internal state instead of calling public API
+- Tests named after implementation details, not behavior
+- Hardcoded credentials, URLs, or secrets
+- Missing `await` on async calls
+- Resource leaks (unclosed connections, file handles, timers)
 
-- **Never trust `[x]` checkboxes.** Verify each AC with test evidence or code trace.
-- **Think in edge cases:** double-invoke, timeout, empty input, channel full, panic paths.
-- **Check coupling:** does the new code create hidden dependencies on other tickets?
-- **Verify imports:** are all used crates declared in Cargo.toml?
-- **Check for tokio runtime:** async tests need `#[tokio::test]`, synchronous tests on async types should use `try_recv()`.
-- **Test isolation:** tests should use static JSON/payloads, never network calls.
-- **Always run `cargo test`, `cargo clippy`, and `cargo check`** — do not rely on the agent's word that they pass.
+## Phase 6: Standards Compliance
+
+Check against any project coding standards found in:
+- `AGENTS.md`, `CONTRIBUTING.md`, `.github/pull_request_template.md`
+- Linter config files
+- Nearby files for conventions (naming, imports, patterns)
+
+If no standards documents exist, assess against language-community conventions.
+
+## Phase 7: Git Hygiene
+
+- Are there unintended files in the changeset (artifacts, secrets, OS files)?
+- Does the branch have a clean, focused diff?
+- Are unrelated changes mixed in?
+
+## Phase 8: Verdict
+
+One of:
+
+- **APPROVED** — zero blockers, zero high-severity issues
+- **APPROVED WITH OBSERVATIONS** — no blockers, some HIGH/MEDIUM items noted
+- **REJECTED** — one or more BLOCKER issues
+
+Summarize blockers and required follow-ups in one paragraph.
+
+## Output Format
+
+Use this exact section order in your report. Keep the report concise — one
+sentence per line item unless explaining a finding. Use tables for repetitive
+data (AC matrix, test inventory, standards checklist).
