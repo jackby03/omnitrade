@@ -21,13 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fee_rate,
             slippage_bps,
         } => {
-            let config = BacktestConfig::new(
-                script,
-                data,
-                initial_balance,
-                fee_rate,
-                slippage_bps,
-            );
+            let config = BacktestConfig::new(script, data, initial_balance, fee_rate, slippage_bps);
 
             let result = run_backtest(&config)?;
             println!("=== Backtest Results ===");

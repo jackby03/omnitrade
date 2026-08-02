@@ -1,16 +1,19 @@
-//! # omnitrade-ui
-//!
-//! GPU-accelerated desktop GUI for the omnitrade trading terminal.
-//!
-//! Built with `egui` and `egui_tiles` for immediate-mode rendering with
-//! dockable workspace panels. The UI is a **passive subscriber** — it
-//! consumes state snapshots from the engine via broadcast channels and
-//! never executes trading logic directly.
-//!
-//! ## Status
-//!
-//! **Phase 5** — Not yet implemented. This is a placeholder binary.
+//! Main application entry point for `omnitrade-ui`.
 
-fn main() {
-    println!("omnitrade-ui: not yet implemented");
+use std::sync::{Arc, RwLock};
+
+use omnitrade_ui::{OmniTradeApp, UIState};
+
+fn main() -> eframe::Result<()> {
+    let state = Arc::new(RwLock::new(UIState::new()));
+    let app = OmniTradeApp::new(state);
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 800.0])
+            .with_title("omnitrade"),
+        ..Default::default()
+    };
+
+    eframe::run_native("omnitrade", options, Box::new(|_cc| Ok(Box::new(app))))
 }

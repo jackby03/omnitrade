@@ -159,6 +159,20 @@ impl L2OrderBook {
         }
     }
 
+    /// Returns an iterator over bid levels (price, quantity) sorted descending.
+    pub fn bids(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
+        self.bids
+            .iter()
+            .map(|(price, &qty)| (price.0.into_inner(), qty))
+    }
+
+    /// Returns an iterator over ask levels (price, quantity) sorted ascending.
+    pub fn asks(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
+        self.asks
+            .iter()
+            .map(|(price, &qty)| (price.into_inner(), qty))
+    }
+
     /// Returns the quantity available at a given price level across bids and asks.
     pub fn depth_at(&self, price: f64) -> Option<f64> {
         let key = OrderedFloat::new(price).ok()?;
