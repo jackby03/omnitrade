@@ -9,8 +9,8 @@ All engineering tickets live in `.agents/backlog/`. Read [backlog/README.md](bac
 | Phase | Tickets | Crate | Status |
 |---|---|---|---|
 | 1 | `CORE-001` → `CORE-004` | `omnitrade-core` | ✅ DONE |
-| 2 | `EXCH-001` → `EXCH-005` | `omnitrade-exchange` | 🔲 TODO |
-| 3 | `ENG-001` → `ENG-006` | `omnitrade-engine` | 🔲 TODO |
+| 2 | `EXCH-001` → `EXCH-005` | `omnitrade-exchange` | ✅ DONE |
+| 3 | `ENG-001` → `ENG-006` | `omnitrade-engine` | ✅ DONE |
 | 4 | `SCR-001` → `SCR-005` | `omnitrade-script` | 🔲 TODO |
 | 4 | `CLI-001` → `CLI-002` | `omnitrade-cli` | 🔲 TODO |
 | 5 | `UI-001` → `UI-004` | `omnitrade-ui` | 🔲 TODO |
