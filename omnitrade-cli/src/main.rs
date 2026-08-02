@@ -4,8 +4,10 @@
 //! automated integration tests without a GUI.
 
 mod args;
+mod backtest;
 
 use args::{CliArgs, Commands};
+use backtest::{run_backtest, BacktestConfig};
 use clap::Parser;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,13 +21,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fee_rate,
             slippage_bps,
         } => {
-            println!(
-                "Running backtest: script={:?}, data={:?}, initial_balance={}, fee_rate={}, slippage_bps={}",
-                script, data, initial_balance, fee_rate, slippage_bps
+            let config = BacktestConfig::new(
+                script,
+                data,
+                initial_balance,
+                fee_rate,
+                slippage_bps,
             );
+
+            let result = run_backtest(&config)?;
+            println!("=== Backtest Results ===");
+            println!("Total PnL:       {:.2}", result.total_pnl);
+            println!("Final Balance:   {:.2}", result.final_balance);
+            println!("Total Trades:    {}", result.total_trades);
+            println!("Win Rate:        {:.2}%", result.win_rate * 100.0);
+            println!("Max Drawdown:    {:.2}%", result.max_drawdown * 100.0);
         }
         Commands::Validate { script } => {
-            println!("Validating script: {:?}", script);
+            let script_content = std::fs::read_to_string(&script)?;
+            let tokens = omnitrade_script::tokenize(&script_content)?;
+            let _stmts = omnitrade_script::parse(&tokens)?;
+            println!("Script validation successful: {:?}", script);
         }
     }
 
