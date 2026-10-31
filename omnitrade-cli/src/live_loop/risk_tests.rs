@@ -77,6 +77,52 @@ async fn real_loss_is_still_blocked_after_valuing_holdings() {
     );
 }
 
+#[tokio::test]
+async fn perpetual_drawdown_ignores_foreign_account_movements() {
+    // Laufkapital 50, Konto 140 -> 288 -> 246 durch FREMDE Bewegungen (31.10.2026).
+    // Die eigene Position steht bei uPnL 0.
+    let mut guard = RiskGuard::new(omnitrade_risk::RiskLimits::new(
+        1_000_000_000.0,
+        10.0,
+        1_000_000_000.0,
+    ));
+    let req = OrderRequest::market("BTCUSDT".into(), Side::Buy, 0.0001);
+    for konto in [140.0, 288.0, 246.0] {
+        let res = place_order_guarded(
+            &trading_with(konto, 0.0),
+            &mut guard,
+            &req,
+            50_000.0,
+            50.0,
+            Some("USDT"),
+            None,
+            None,
+        )
+        .await;
+        assert!(res.is_ok(), "Konto {konto}: {res:?}");
+    }
+}
+
+#[tokio::test]
+async fn perpetual_drawdown_still_blocks_own_unrealized_loss() {
+    // Laufkapital 50, uPnL +4 dann -3 => Spitze 54, Stand 47 = 13 % Drawdown.
+    let mut guard = RiskGuard::new(omnitrade_risk::RiskLimits::new(
+        1_000_000_000.0,
+        10.0,
+        1_000_000_000.0,
+    ));
+    let req = OrderRequest::market("BTCUSDT".into(), Side::Buy, 0.0001);
+    let trading = trading_with(200.0, 0.0);
+    *trading.pos_upl.lock().expect("upl") = (vec![4.0, -3.0], 0);
+    place_order_guarded(&trading, &mut guard, &req, 50_000.0, 50.0, Some("USDT"), None, None)
+        .await
+        .expect("erste Order");
+    let res =
+        place_order_guarded(&trading, &mut guard, &req, 50_000.0, 50.0, Some("USDT"), None, None)
+            .await;
+    assert!(matches!(res, Err(LiveLoopError::RiskViolation(_))), "{res:?}");
+}
+
 fn perp(base_qty: f64, upl: f64) -> PositionSnapshot {
     PositionSnapshot {
         is_perpetual: true,

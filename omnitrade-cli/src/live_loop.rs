@@ -515,6 +515,9 @@ pub(crate) async fn place_order_guarded(
         initial: f64,
         current: f64,
         pnl: f64,
+        /// Equity des LAUF-Kapitals: deklariertes Startkapital + uPnL der eigenen
+        /// Position. Das Konto ist geteilt und taugt nicht als Drawdown-Basis.
+        run_equity: f64,
     }
 
     impl omnitrade_risk::guard::AccountInfo for SimpleAccount {
@@ -528,6 +531,10 @@ pub(crate) async fn place_order_guarded(
 
         fn initial_balance(&self) -> f64 {
             self.initial
+        }
+
+        fn drawdown_equity(&self) -> f64 {
+            self.run_equity
         }
     }
 
@@ -576,6 +583,14 @@ pub(crate) async fn place_order_guarded(
         initial: initial_capital,
         current: equity,
         pnl: equity - initial_capital,
+        // Perpetuals (mit Abrechnungswaehrung) teilen sich das Konto mit anderen Spuren: dort zaehlt nur das
+        // Laufkapital plus der eigene uPnL. Spot bleibt bei der Paar-Equity (der
+        // Wertverlust der gekauften Basis ist dort der Verlust des Laufs).
+        run_equity: if position.is_perpetual && settle_currency.is_some() {
+            initial_capital + position.unrealized_pnl
+        } else {
+            equity
+        },
     };
 
     // Check risk guard
