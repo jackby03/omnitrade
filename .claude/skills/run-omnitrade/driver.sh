@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Treiber fuer omnitrade: GUI unter Xvfb (Start, Screenshot, Klicks per xdotool)
+# Treiber fuer omnitrade im LINUX-CONTAINER (nicht auf dem Windows-Host; dort: driver.ps1).
+# Auf diesem Stand nicht gelaufen. GUI unter Xvfb (Start, Screenshot, Klicks per xdotool)
 # und CLI-Smoke (validate, backtest). Aufruf aus beliebigem Verzeichnis:
 #   .claude/skills/run-omnitrade/driver.sh <befehl>
 # Befehle: build | flow | start | shot [name] | killswitch | reset | status | stop | cli | fetch
@@ -142,7 +143,6 @@ cmd_cli() {
   "$cli" validate --script "$SKILL_DIR/sample_buy.omni"
   "$cli" validate --script "$SKILL_DIR/sample_rsi.omni"
   "$cli" backtest --script "$SKILL_DIR/sample_buy.omni" --data "$RUN/btc_1h.csv" --initial-balance 1000000
-  echo "HINWEIS: sample_rsi.omni ist mit backtest auf HEAD defekt (Warmup-Bug, siehe SKILL.md)"
 }
 
 cmd_flow() {
