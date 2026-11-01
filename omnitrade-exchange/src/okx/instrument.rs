@@ -90,6 +90,12 @@ pub struct Instrument {
     pub lot_sz: f64,
     /// Mindestmenge in Kontrakten (SWAP) bzw. Basiswährung (SPOT).
     pub min_sz: f64,
+    /// Währung, in der der Kontrakt abgerechnet wird (`settleCcy`).
+    ///
+    /// Bei XPERP ist das USDC, obwohl das Symbol `USD` sagt — wer die Equity aus
+    /// dem Kontostand rechnet, muss diese Währung nehmen, sonst findet er keinen
+    /// Bestand und bewertet das Konto mit 0.
+    pub settle_ccy: Option<String>,
 }
 
 impl Instrument {
@@ -113,12 +119,21 @@ impl Instrument {
             InstType::Swap | InstType::Futures => number_field(v, "ctVal")?,
             InstType::Spot => 1.0,
         };
+        // `settleCcy` ist die Abrechnungswaehrung des Kontrakts (XPERP: USDC, obwohl
+        // das Symbol `USD` traegt). Fehlt sie, bleibt es bei `None` — der Aufrufer
+        // rechnet dann wie bisher mit der Quote des Symbols.
+        let settle_ccy = v
+            .get("settleCcy")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let instrument = Self {
             inst_id,
             inst_type,
             ct_val,
             lot_sz: number_field(v, "lotSz")?,
             min_sz: number_field(v, "minSz")?,
+            settle_ccy,
         };
         instrument.validate()?;
         Ok(instrument)
@@ -211,6 +226,24 @@ mod tests {
         assert_eq!(inst.ct_val, 0.01);
         assert_eq!(inst.lot_sz, 0.01);
         assert_eq!(inst.min_sz, 0.01);
+    }
+
+    #[test]
+    fn liest_die_abrechnungswaehrung_aus_settle_ccy() {
+        // XPERP des EEA-Kontos: Symbol sagt USD, abgerechnet wird in USDC.
+        let xperp = serde_json::json!({
+            "instId": "SOL-USD_UM_XPERP-310404", "instType": "FUTURES", "ctVal": "0.01",
+            "ctValCcy": "SOL", "settleCcy": "USDC", "lotSz": "1", "minSz": "1",
+        });
+        let inst = Instrument::parse(&xperp).expect("XPERP parses");
+        assert_eq!(inst.settle_ccy.as_deref(), Some("USDC"));
+
+        // Fehlt das Feld, bleibt es leer - der Aufrufer faellt auf die Quote zurueck.
+        let ohne = serde_json::json!({
+            "instId": "BTC-USDT", "instType": "SPOT", "lotSz": "0.00000001", "minSz": "0.00001",
+        });
+        let spot = Instrument::parse(&ohne).expect("SPOT parses");
+        assert_eq!(spot.settle_ccy, None);
     }
 
     #[test]

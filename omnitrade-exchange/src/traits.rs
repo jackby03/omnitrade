@@ -47,6 +47,20 @@ pub trait ExchangeStream: Send + Sync {
         symbol: &str,
     ) -> Result<mpsc::Receiver<DepthUpdate>, ExchangeError>;
 
+    /// Bestaetigte Kerzen per REST — Rueckfallweg, wenn der WebSocket still bleibt.
+    ///
+    /// Boersen ohne oeffentlichen Kerzenabruf lassen die Vorgabe stehen; der Live-Loop
+    /// meldet den Fehlschlag dann im Log, statt still weiterzulaufen.
+    async fn recent_candles(
+        &self,
+        _symbol: &str,
+        _interval: &str,
+        _limit: usize,
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        Err(ExchangeError::InvalidRequest(
+            "diese Boerse liefert keine Kerzen per REST".to_string(),
+        ))
+    }
     /// Gracefully disconnects from the exchange feed.
     async fn disconnect(&mut self) -> Result<(), ExchangeError>;
 }

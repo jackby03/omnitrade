@@ -95,6 +95,13 @@ pub enum Commands {
         /// Bestätigt, dass auf Mainnet echtes Geld eingesetzt wird (nur OKX).
         #[arg(long)]
         confirm_real_money: bool,
+
+        /// Erlaubt Kurzpositionen: Ein Sell-Signal bei (nahezu) flacher Position
+        /// öffnet einen Short (OKX net mode). Standard ist long-only (Haussatz
+        /// C.2: Shorts erst nach belegtem Long-Lauf). Der Positionsdeckel
+        /// `--max-notional-usd` gilt dann in beide Richtungen.
+        #[arg(long)]
+        allow_shorts: bool,
         /// Write a JSON status snapshot to this file while running
         /// (read-only view for dashboards; written atomically).
         #[arg(long, value_name = "PATH")]
@@ -288,6 +295,7 @@ mod tests {
             confirm_real_money,
             status_file,
             interval,
+            ..
         } = parsed.command
         {
             assert_eq!(script, Some(PathBuf::from("strategy.omni")));
@@ -335,6 +343,7 @@ mod tests {
             confirm_real_money,
             status_file,
             interval,
+            ..
         } = parsed.command
         {
             assert_eq!(script, None);
@@ -386,6 +395,7 @@ mod tests {
             confirm_real_money,
             status_file,
             interval,
+            ..
         } = parsed.command
         {
             assert_eq!(script, Some(PathBuf::from("strategy.omni")));
@@ -466,6 +476,33 @@ mod tests {
         {
             assert_eq!(exchange, "okx");
             assert_eq!(symbol, "BTC-USDT");
+        } else {
+            unreachable!("Expected Commands::Live variant");
+        }
+    }
+
+    #[test]
+    fn parses_allow_shorts_flag() {
+        // Arrange & Act
+        let args = vec!["omnitrade-cli", "live", "--symbol", "BTCUSDT", "--allow-shorts"];
+        let parsed = CliArgs::try_parse_from(args).expect("Should parse --allow-shorts");
+
+        // Assert
+        if let Commands::Live {
+            allow_shorts, symbol, ..
+        } = parsed.command
+        {
+            assert!(allow_shorts);
+            assert_eq!(symbol, "BTCUSDT");
+        } else {
+            unreachable!("Expected Commands::Live variant");
+        }
+
+        // Ohne Flag: long-only bleibt der Standard.
+        let parsed = CliArgs::try_parse_from(["omnitrade-cli", "live", "--symbol", "BTCUSDT"])
+            .expect("Should parse without flag");
+        if let Commands::Live { allow_shorts, .. } = parsed.command {
+            assert!(!allow_shorts);
         } else {
             unreachable!("Expected Commands::Live variant");
         }

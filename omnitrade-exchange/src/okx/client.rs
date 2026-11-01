@@ -68,9 +68,7 @@ fn validate_symbol(symbol: &str) -> Result<String, ExchangeError> {
     let ok = match core.split('-').collect::<Vec<_>>().as_slice() {
         [base, quote] if !base.is_empty() && !quote.is_empty() => true,
         // BASE-QUOTE_UM_XPERP-YYMMDD (EEA-Perpetual)
-        [base, mid, expiry]
-            if !base.is_empty() && mid.contains("_UM_XPERP") && digits6(expiry) =>
-        {
+        [base, mid, expiry] if !base.is_empty() && mid.contains("_UM_XPERP") && digits6(expiry) => {
             true
         }
         // BASE-QUOTE-YYMMDD (datiertes Future)
@@ -102,6 +100,7 @@ pub struct OkxClient {
     business_url: String,
     public_subs: Vec<String>,
     business_subs: Vec<String>,
+    network: Network,
     router: Option<OkxRouter>,
     raw_tx: mpsc::Sender<String>,
     tasks: Vec<JoinHandle<()>>,
@@ -124,12 +123,14 @@ impl OkxClient {
     /// Like [`Self::for_network`], but `eea = true` selects the `wseea`/`wseeapap` hosts
     /// used by accounts registered in the EEA.
     pub fn for_region(network: Network, eea: bool) -> Self {
-        match (network, eea) {
+        let mut client = match (network, eea) {
             (Network::Testnet, false) => Self::with_urls(DEMO_PUBLIC_URL, DEMO_BUSINESS_URL),
             (Network::Testnet, true) => Self::with_urls(EEA_DEMO_PUBLIC_URL, EEA_DEMO_BUSINESS_URL),
             (Network::Mainnet, false) => Self::new(),
             (Network::Mainnet, true) => Self::with_urls(EEA_PUBLIC_URL, EEA_BUSINESS_URL),
-        }
+        };
+        client.network = network;
+        client
     }
 
     /// Creates a client for custom endpoints (tests).
@@ -140,6 +141,7 @@ impl OkxClient {
             business_url: business_url.into(),
             public_subs: Vec::new(),
             business_subs: Vec::new(),
+            network: Network::Mainnet,
             router: Some(OkxRouter::new(raw_rx)),
             raw_tx,
             tasks: Vec::new(),
@@ -163,64 +165,138 @@ impl OkxClient {
         &mut self,
         url: String,
         subs: Vec<String>,
-        mut shutdown: watch::Receiver<bool>,
+        shutdown: watch::Receiver<bool>,
     ) -> Result<(), ExchangeError> {
-        let (ws, _) = tokio_tungstenite::connect_async(&url).await.map_err(|e| {
-            ExchangeError::ConnectionFailed {
-                url: url.clone(),
-                reason: e.to_string(),
-            }
-        })?;
-        info!("Connected to OKX WebSocket at '{url}'");
-        let (mut write, mut read) = ws.split();
-        for sub in subs {
-            write.send(Message::Text(sub.into())).await.map_err(|e| {
-                ExchangeError::ConnectionFailed {
-                    url: url.clone(),
-                    reason: format!("subscribe failed: {e}"),
-                }
-            })?;
-        }
+        let (write, read) = verbinde(&url, &subs).await?;
         let raw_tx = self.raw_tx.clone();
-        self.tasks.push(tokio::spawn(async move {
-            let mut ping = tokio::time::interval(PING_INTERVAL);
-            loop {
-                tokio::select! {
-                    _ = shutdown.changed() => {
-                        let _ = write.close().await;
-                        break;
+        self.tasks.push(tokio::spawn(lesen_mit_neuaufbau(
+            url, subs, raw_tx, shutdown, write, read,
+        )));
+        Ok(())
+    }
+}
+
+type WsSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    Message,
+>;
+type WsRead = futures_util::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+>;
+
+/// Wartezeit vor dem naechsten Verbindungsversuch: 1, 2, 4, 8, 16, hoechstens 30 s.
+pub(crate) fn wiederverbindung_wartezeit(versuch: u32) -> Duration {
+    let sekunden = 1u64 << versuch.saturating_sub(1).min(5);
+    Duration::from_secs(sekunden.min(30))
+}
+
+/// Baut eine Verbindung auf und schickt die Abo-Nachrichten.
+async fn verbinde(url: &str, subs: &[String]) -> Result<(WsSink, WsRead), ExchangeError> {
+    let (ws, _) = tokio_tungstenite::connect_async(url).await.map_err(|e| {
+        ExchangeError::ConnectionFailed {
+            url: url.to_string(),
+            reason: e.to_string(),
+        }
+    })?;
+    let (mut write, read) = ws.split();
+    for sub in subs {
+        write
+            .send(Message::Text(sub.clone().into()))
+            .await
+            .map_err(|e| ExchangeError::ConnectionFailed {
+                url: url.to_string(),
+                reason: format!("subscribe failed: {e}"),
+            })?;
+    }
+    info!("Connected to OKX WebSocket at '{url}'");
+    Ok((write, read))
+}
+
+/// Liest bis zum Fehler und baut die Verbindung dann neu auf.
+///
+/// Ein einzelner Lesefehler (z. B. `Connection reset without closing handshake`)
+/// beendete bisher nur diese Task. Der Kanal zum Router blieb dabei offen, das
+/// `candle_rx.recv()` im Live-Loop wartete also ewig: der Prozess lebte, schrieb
+/// keine Statusdatei mehr und handelte nicht mehr (21.10.2026, 5,5 h still).
+/// Deshalb endet diese Task nur noch, wenn der Aufrufer abschaltet oder der
+/// Router verschwindet - sonst wird bis zum Erfolg neu verbunden.
+async fn lesen_mit_neuaufbau(
+    url: String,
+    subs: Vec<String>,
+    raw_tx: mpsc::Sender<String>,
+    mut shutdown: watch::Receiver<bool>,
+    mut write: WsSink,
+    mut read: WsRead,
+) {
+    let mut versuch: u32 = 0;
+    loop {
+        let mut ping = tokio::time::interval(PING_INTERVAL);
+        let grund = loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    let _ = write.close().await;
+                    return;
+                }
+                _ = ping.tick() => {
+                    if write.send(Message::Text("ping".into())).await.is_err() {
+                        break String::from("ping fehlgeschlagen");
                     }
-                    _ = ping.tick() => {
-                        if write.send(Message::Text("ping".into())).await.is_err() {
-                            break;
+                }
+                msg = read.next() => match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if text.as_str() == "pong" {
+                            continue;
+                        }
+                        if raw_tx.send(text.to_string()).await.is_err() {
+                            return;
                         }
                     }
-                    msg = read.next() => match msg {
-                        Some(Ok(Message::Text(text))) => {
-                            if text.as_str() == "pong" {
-                                continue;
-                            }
-                            if raw_tx.send(text.to_string()).await.is_err() {
-                                break;
-                            }
-                        }
-                        Some(Ok(Message::Ping(payload))) => {
-                            let _ = write.send(Message::Pong(payload)).await;
-                        }
-                        Some(Ok(Message::Close(_))) | None => {
-                            info!("OKX WebSocket closed");
-                            break;
-                        }
-                        Some(Ok(_)) => {}
-                        Some(Err(err)) => {
-                            warn!("OKX WebSocket read error: {err}");
-                            break;
-                        }
+                    Some(Ok(Message::Ping(payload))) => {
+                        let _ = write.send(Message::Pong(payload)).await;
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        break String::from("Verbindung geschlossen");
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => {
+                        break format!("Lesefehler: {err}");
                     }
                 }
             }
-        }));
-        Ok(())
+        };
+
+        versuch += 1;
+        let warte = wiederverbindung_wartezeit(versuch);
+        warn!(
+            "OKX WebSocket {url}: {grund} - neuer Aufbau in {} s (Versuch {versuch})",
+            warte.as_secs()
+        );
+        tokio::select! {
+            _ = tokio::time::sleep(warte) => {}
+            _ = shutdown.changed() => return,
+        }
+        loop {
+            match verbinde(&url, &subs).await {
+                Ok((neuer_sender, neuer_leser)) => {
+                    write = neuer_sender;
+                    read = neuer_leser;
+                    versuch = 0;
+                    break;
+                }
+                Err(err) => {
+                    versuch += 1;
+                    let warte = wiederverbindung_wartezeit(versuch);
+                    warn!(
+                        "OKX WebSocket {url}: {err} - naechster Versuch in {} s",
+                        warte.as_secs()
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(warte) => {}
+                        _ = shutdown.changed() => return,
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -311,6 +387,16 @@ impl ExchangeStream for OkxClient {
         Ok(rx)
     }
 
+    /// Rueckfallweg, wenn der WebSocket still bleibt: bestaetigte Kerzen per REST.
+    async fn recent_candles(
+        &self,
+        symbol: &str,
+        interval: &str,
+        limit: usize,
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        crate::okx::klines::fetch_klines(self.network, symbol, interval, limit).await
+    }
+
     async fn disconnect(&mut self) -> Result<(), ExchangeError> {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(true);
@@ -350,6 +436,85 @@ mod tests {
         assert_eq!(validate_symbol("BTC-USDT").expect("spot"), "BTC-USDT");
         assert!(validate_symbol("BTC-USDT-SWAP-X").is_err());
         assert!(validate_symbol("-USDT-SWAP").is_err());
+    }
+
+    /// Eine Kerzen-Nachricht, wie OKX sie auf `candle1m` schickt (bestaetigt).
+    fn kerzen_nachricht(ts: u64) -> String {
+        format!(
+            r#"{{"arg":{{"channel":"candle1m","instId":"BTC-USDT"}},
+               "data":[["{ts}","100","101","99","100.5","1","1","1","1"]]}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn baut_nach_abgerissener_verbindung_neu_auf() {
+        // Arrange: ein lokaler Server, der je Verbindung genau eine Kerze schickt
+        // und den Socket dann hart fallen laesst (so wie OKX es am 21.10.2026 tat).
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let adresse = listener.local_addr().expect("addr");
+        let verbindungen = Arc::new(AtomicUsize::new(0));
+        let zaehler = Arc::clone(&verbindungen);
+        tokio::spawn(async move {
+            loop {
+                let Ok((strom, _)) = listener.accept().await else {
+                    return;
+                };
+                let nummer = zaehler.fetch_add(1, Ordering::SeqCst) as u64 + 1;
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(strom).await else {
+                        return;
+                    };
+                    let _ = ws.next().await; // Abo-Nachricht des Clients
+                    let _ = ws
+                        .send(Message::Text(kerzen_nachricht(1_000 * nummer).into()))
+                        .await;
+                    // Kurz warten, damit die Kerze wirklich beim Client ankommt -
+                    // ein sofortiger Abbruch verwirft sie auf Loopback.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    drop(ws); // kein Close-Frame: harter Abbruch
+                });
+            }
+        });
+
+        let mut client = OkxClient::with_urls(format!("ws://{adresse}"), format!("ws://{adresse}"));
+        let mut kerzen = client
+            .subscribe_candles("BTC-USDT", "1m")
+            .await
+            .expect("abo");
+
+        // Act
+        client.connect().await.expect("verbinden");
+        let erste = tokio::time::timeout(Duration::from_secs(5), kerzen.recv())
+            .await
+            .expect("erste Kerze kam nicht")
+            .expect("Kanal zu");
+        let zweite = tokio::time::timeout(Duration::from_secs(15), kerzen.recv())
+            .await
+            .expect("nach dem Abbruch kam keine zweite Kerze - kein Reconnect")
+            .expect("Kanal zu");
+
+        // Assert: der Client hat neu verbunden und liefert weiter.
+        assert!(zweite.timestamp_ms > erste.timestamp_ms);
+        assert!(
+            verbindungen.load(Ordering::SeqCst) >= 2,
+            "der Client hat die Verbindung nicht neu aufgebaut"
+        );
+    }
+
+    #[test]
+    fn backoff_beginnt_bei_einer_sekunde_und_deckelt_bei_dreissig() {
+        // Arrange + Act
+        let stufen: Vec<u64> = (1..=8)
+            .map(|v| wiederverbindung_wartezeit(v).as_secs())
+            .collect();
+
+        // Assert
+        assert_eq!(stufen, vec![1, 2, 4, 8, 16, 30, 30, 30]);
+        assert_eq!(wiederverbindung_wartezeit(0).as_secs(), 1);
     }
 
     #[test]

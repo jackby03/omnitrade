@@ -41,10 +41,29 @@ pub(crate) fn parse_swap_position(
     Ok(snapshot)
 }
 
-/// Preisfeld: `None` bei leerem Text, Fehler bei fehlendem oder ungültigem Feld.
+/// Preisfeld: `None` NUR bei leerem Text (OKX: „nicht zutreffend").
+///
+/// `0` bleibt 0. OKX meldet `liqPx: "0"` fuer Positionen OHNE Liquidationspreis
+/// (1x isolated: es kann keine Liquidation geben). Wer 0 als „unbekannt" liest,
+/// macht daraus `None`, und `check_liquidation_distance` verweigert dann JEDES
+/// Nachlegen - am 21.10.2026 genau so passiert (`Buy` abgelehnt mit
+/// „Liquidationspreis oder Markpreis fehlt bei offener Position", obwohl der
+/// Markpreis mit 108,27 vorlag). Die Distanz zu 0 ist 100 %, die Sperre greift
+/// also nicht - das ist die richtige Aussage.
 fn optional_price(item: &Value, key: &str) -> Result<Option<f64>, ExchangeError> {
-    let value = optional_number(item, key)?;
-    Ok((value > 0.0).then_some(value))
+    let raw = item
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| ExchangeError::AccountError(format!("Position ohne Feld '{key}'")))?;
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let wert = raw
+        .parse::<f64>()
+        .ok()
+        .filter(|x| x.is_finite() && *x >= 0.0)
+        .ok_or_else(|| ExchangeError::AccountError(format!("Feld '{key}' ist kein Preis")))?;
+    Ok(Some(wert))
 }
 
 fn optional_number(item: &Value, key: &str) -> Result<f64, ExchangeError> {
@@ -124,6 +143,27 @@ impl OkxRestClient {
             .call(Method::GET, "/api/v5/account/config", None)
             .await?;
         swap::check_position_mode(&data)
+    }
+
+    /// Abrechnungswaehrung des KONTOS (`settleCcy` aus `/account/config`).
+    ///
+    /// Diese Waehrung ist die Wahrheit fuer die Equity-Bewertung: bei XPERP sagt
+    /// das Instrument `settleCcy: USD`, waehrend dasselbe Konto in USDC abrechnet
+    /// (gemessen an eea.okx.com am 21.10.2026: acctLv 2, settleCcy USDC). Wer dem
+    /// Instrument glaubt, findet im Kontostand keinen Bestand und bewertet mit 0.
+    ///
+    /// # Errors
+    /// API-Fehler beim Lesen der Kontokonfiguration; `None`, wenn das Feld fehlt.
+    pub async fn account_settle_ccy(&self) -> Result<Option<String>, ExchangeError> {
+        let data = self
+            .call(Method::GET, "/api/v5/account/config", None)
+            .await?;
+        Ok(data
+            .first()
+            .and_then(|v| v.get("settleCcy"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string))
     }
 
     /// Liefert die gecachte SWAP-Regel oder einen Fehler mit Handlungsanweisung.
@@ -210,11 +250,7 @@ mod tests {
 
     fn seeded_client(inst: &Instrument) -> OkxRestClient {
         use crate::{ApiCredentials, Network};
-        let creds = ApiCredentials::new(
-            "key".to_string(),
-            "secret".to_string(),
-            Network::Testnet,
-        );
+        let creds = ApiCredentials::new("key".to_string(), "secret".to_string(), Network::Testnet);
         let client = OkxRestClient::new(creds, "passphrase".to_string()).expect("client");
         client
             .instruments
@@ -320,6 +356,29 @@ mod tests {
         let snap = parse_swap_position(&data, &btc_swap()).expect("parses");
         assert_eq!(snap.liq_price, Some(45_000.5));
         assert_eq!(snap.mark_price, Some(50_000.0));
+    }
+
+    /// OKX meldet `liqPx: "0"`, wenn es keine Liquidation gibt (1x isolated).
+    /// Das ist ein PREIS (0), kein fehlender Wert - sonst verweigert der
+    /// RiskGuard jedes Nachlegen (Befund 21.10.2026).
+    #[test]
+    fn liquidation_preis_null_bedeutet_keine_liquidation() {
+        let data = [json!({
+            "instId": "SOL-USD_UM_XPERP-310404", "pos": "10", "upl": "-0.003",
+            "liqPx": "0", "markPx": "108.27"
+        })];
+        let inst = Instrument::parse(&json!({
+            "instId": "SOL-USD_UM_XPERP-310404", "instType": "FUTURES", "ctVal": "0.01",
+            "ctValCcy": "SOL", "settleCcy": "USD", "lotSz": "1", "minSz": "1",
+        }))
+        .expect("XPERP");
+        let snap = parse_swap_position(&data, &inst).expect("parses");
+        assert_eq!(
+            snap.liq_price,
+            Some(0.0),
+            "0 ist ein Preis, kein fehlender Wert"
+        );
+        assert_eq!(snap.mark_price, Some(108.27));
     }
 
     #[test]

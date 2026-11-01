@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 pub(crate) const BUY_BELOW_40K: &str = "if close() < 40000 { buy() }";
+pub(crate) const SELL_ABOVE_40K: &str = "if close() > 40000 { sell() }";
 
 pub(crate) type Log = Arc<Mutex<Vec<String>>>;
 /// Stream-Mock: liefert vorbereitete Kerzen und protokolliert die Aufrufreihenfolge.
@@ -56,6 +57,16 @@ pub(crate) struct MockTrading {
     pub(crate) usdt: Option<f64>,
     /// Gehaltene BTC (Basis-Bestand); 0 = kein Eintrag im Konto.
     pub(crate) btc: f64,
+    /// Position, die die BOERSE meldet (vorzeichenbehaftet, Basiswaehrung).
+    /// Unabhaengig davon, was dieser Lauf selbst geordert hat - genau das ist
+    /// der Punkt beim Buchabgleich.
+    pub(crate) pos_qty: f64,
+    /// Waehrung, in der das Konto seinen Bestand fuehrt (Standard USDT).
+    /// XPERP-Konten fuehren USDC, waehrend das Symbol `USD` sagt.
+    pub(crate) waehrung: &'static str,
+    /// uPnL, die die Boerse je Abruf meldet (Reihe, letzter Wert bleibt stehen).
+    /// Damit laesst sich der Ablauf "erst Peak, dann Verlust" nachstellen.
+    pub(crate) pos_upl: Arc<Mutex<(Vec<f64>, usize)>>,
     pub(crate) placed: Arc<Mutex<Vec<OrderRequest>>>,
     pub(crate) cancelled: Arc<Mutex<Vec<String>>>,
 }
@@ -110,11 +121,40 @@ impl ExchangeTrading for MockTrading {
         }])
     }
 
+    async fn position_snapshot(
+        &self,
+        _symbol: &str,
+    ) -> Result<omnitrade_exchange::PositionSnapshot, ExchangeError> {
+        let upl = {
+            let mut z = self.pos_upl.lock().expect("upl");
+            let i = z.1.min(z.0.len().saturating_sub(1));
+            let wert = z.0.get(i).copied().unwrap_or(0.0);
+            z.1 += 1;
+            wert
+        };
+        // Bei offener Position verlangt der Guard Liq- und Markpreis (fail closed);
+        // die Attrappe liefert einen weiten Abstand, damit der Abstandstest gruen ist.
+        let (liq, mark) = if self.pos_qty == 0.0 {
+            (None, None)
+        } else {
+            (Some(1.0), Some(1_000.0))
+        };
+        Ok(omnitrade_exchange::PositionSnapshot {
+            is_perpetual: true,
+            base_qty: self.pos_qty,
+            unrealized_pnl: upl,
+            liq_price: liq,
+            mark_price: mark,
+        })
+    }
+
     async fn get_balance(&self) -> Result<Account, ExchangeError> {
         match self.usdt {
             Some(free) => {
-                let mut balances =
-                    HashMap::from([("USDT".to_string(), AccountBalance { free, locked: 0.0 })]);
+                let mut balances = HashMap::from([(
+                    self.waehrung.to_string(),
+                    AccountBalance { free, locked: 0.0 },
+                )]);
                 if self.btc > 0.0 {
                     balances.insert(
                         "BTC".to_string(),
@@ -138,11 +178,24 @@ pub(crate) struct Harness {
     pub(crate) cancelled: Arc<Mutex<Vec<String>>>,
     pub(crate) kill: PathBuf,
     pub(crate) cap: Option<f64>,
+    pub(crate) allow_shorts: bool,
+    pub(crate) settle: Option<&'static str>,
+    pub(crate) pos_qty: f64,
+    pub(crate) status_pfad: Option<PathBuf>,
+    pub(crate) symbol: &'static str,
+    pub(crate) konto_waehrung: &'static str,
+    pub(crate) upl_reihe: Vec<f64>,
 }
 
 impl Harness {
     pub(crate) fn with_cap(mut self, cap: f64) -> Self {
         self.cap = Some(cap);
+        self
+    }
+
+    /// Erlaubt Kurzpositionen (Sell bei flacher Position öffnet Short).
+    pub(crate) fn with_allow_shorts(mut self) -> Self {
+        self.allow_shorts = true;
         self
     }
 
@@ -162,7 +215,54 @@ impl Harness {
                 std::process::id()
             )),
             cap: None,
+            allow_shorts: false,
+            settle: None,
+            pos_qty: 0.0,
+            status_pfad: None,
+            symbol: "BTCUSDT",
+            konto_waehrung: "USDT",
+            upl_reihe: Vec::new(),
         }
+    }
+
+    /// Laesst die Boerse je Abruf diese uPnL melden (letzter Wert bleibt).
+    pub(crate) fn with_upl_reihe(mut self, reihe: &[f64]) -> Self {
+        self.upl_reihe = reihe.to_vec();
+        self
+    }
+
+    /// Handeltssymbol des Laufs (Standard `BTCUSDT`); Perpetuals brauchen ihre
+    /// volle Kennung, z. B. `SOL-USD_UM_XPERP-310404`.
+    pub(crate) fn with_symbol(mut self, symbol: &'static str) -> Self {
+        self.symbol = symbol;
+        self
+    }
+
+    /// Waehrung, in der das Mock-Konto seinen Bestand fuehrt (Standard USDT).
+    pub(crate) fn with_konto_waehrung(mut self, ccy: &'static str) -> Self {
+        self.konto_waehrung = ccy;
+        self
+    }
+
+    /// Schreibt den Status-Snapshot in eine Datei, damit ein Test das Buch lesen kann.
+    pub(crate) fn with_status_file(mut self, name: &str) -> Self {
+        self.status_pfad = Some(std::env::temp_dir().join(format!(
+            "omnitrade-liveloop-{}-{name}-status.json",
+            std::process::id()
+        )));
+        self
+    }
+
+    /// Setzt die Abrechnungswaehrung des Instruments (XPERP: USDC).
+    pub(crate) fn with_settle(mut self, ccy: &'static str) -> Self {
+        self.settle = Some(ccy);
+        self
+    }
+
+    /// Laesst die Boerse eine offene Position melden.
+    pub(crate) fn with_position(mut self, qty: f64) -> Self {
+        self.pos_qty = qty;
+        self
     }
 
     pub(crate) async fn run(
@@ -184,21 +284,24 @@ impl Harness {
         let trading = MockTrading {
             usdt,
             btc: 0.0,
+            pos_qty: self.pos_qty,
+            waehrung: self.konto_waehrung,
+            pos_upl: Arc::new(Mutex::new((self.upl_reihe.clone(), 0))),
             placed: self.placed.clone(),
             cancelled: self.cancelled.clone(),
         };
         let script = self.script.to_string_lossy().to_string();
         let mut status = crate::status::StatusWriter::new(
-            None,
+            self.status_pfad.clone(),
             "okx",
-            "BTC-USDT",
+            self.symbol,
             "testnet",
             "test.omni",
             1000.0,
         );
         let config = LiveConfig {
             script_path: &script,
-            symbol: "BTCUSDT",
+            symbol: self.symbol,
             network,
             initial_capital: 1000.0,
             order_quantity: quantity,
@@ -206,9 +309,18 @@ impl Harness {
             max_notional: self.cap,
             interval: "1m",
             warmup: &[],
+            allow_shorts: self.allow_shorts,
         };
         let mut guard = RiskGuard::testnet();
-        live_loop(&config, stream, trading, &mut guard, &mut status).await
+        live_loop(
+            &config,
+            self.settle,
+            stream,
+            trading,
+            &mut guard,
+            &mut status,
+        )
+        .await
     }
 }
 
@@ -216,12 +328,18 @@ impl Drop for Harness {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.script);
         let _ = fs::remove_file(&self.kill);
+        if let Some(pfad) = &self.status_pfad {
+            let _ = fs::remove_file(pfad);
+        }
     }
 }
 pub(crate) fn trading_with(usdt: f64, btc: f64) -> MockTrading {
     MockTrading {
         usdt: Some(usdt),
         btc,
+        pos_qty: 0.0,
+        waehrung: "USDT",
+        pos_upl: Arc::default(),
         placed: Arc::default(),
         cancelled: Arc::default(),
     }

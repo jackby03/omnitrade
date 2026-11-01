@@ -79,6 +79,36 @@ pub(crate) fn account_equity(
     pair_equity(account, base, quote, price) + position.unrealized_pnl
 }
 
+/// Waehrung, in der die Konto-Equity bewertet wird.
+///
+/// Das Symbol nennt bei XPERP `USD`, das Konto fuehrt aber USDC (die Abrechnungs-
+/// waehrung des Kontrakts). Wer stur die Quote nimmt, findet keinen Bestand und
+/// bewertet das Konto mit 0 — der RiskGuard misst dann einen Drawdown von
+/// Millionen Prozent und lehnt jeden Auftrag ab.
+///
+/// Regel: die Quote gilt, solange das Konto sie traegt. Traegt es sie nicht und
+/// kennt das Instrument eine Abrechnungswaehrung mit Bestand, gilt diese. Sonst
+/// bleibt es bei der Quote (unveraendertes Verhalten, fail open zur alten Regel).
+pub(crate) fn bewertungs_waehrung<'a>(
+    account: &Account,
+    quote: &'a str,
+    settle: Option<&'a str>,
+) -> &'a str {
+    let hat_bestand = |ccy: &str| {
+        account
+            .balances
+            .get(ccy)
+            .is_some_and(|b| b.free + b.locked > 0.0)
+    };
+    if hat_bestand(quote) {
+        return quote;
+    }
+    match settle {
+        Some(ccy) if hat_bestand(ccy) => ccy,
+        _ => quote,
+    }
+}
+
 /// Mindestabstand Markpreis zu Liquidationspreis (relativ zum Markpreis), bevor eine
 /// Position weiter vergrößert werden darf. Bei 10x isolated liegt der Abstand direkt
 /// nach dem Einstieg bei rund 9 %; 5 % lässt nur noch wenig Spielraum.
@@ -128,15 +158,57 @@ pub(crate) fn held_base(account: &Account, base: &str, position: &PositionSnapsh
         .map_or(0.0, |b| b.free + b.locked)
 }
 
+/// Long-only-Bremse, UNABHÄNGIG vom Positionsdeckel.
+///
+/// Ohne `--max-notional` gibt es sonst gar keine Long-only-Regel: ein Sell bei
+/// flacher Position würde eine Kurzposition eröffnen. Die Baseline ist der
+/// Bestand beim ERSTEN geprüften Auftrag; nur die in diesem Lauf gekaufte Menge
+/// ist verkaufbar, Vorbestand wird nie angefasst.
+#[derive(Debug, Default)]
+pub(crate) struct LongOnlyGuard {
+    start_base: Option<f64>,
+}
+
+impl LongOnlyGuard {
+    pub(crate) fn new() -> Self {
+        Self { start_base: None }
+    }
+
+    /// `held` ist die aktuelle NETTO-Position (`held_base`).
+    pub(crate) fn check(&mut self, side: Side, quantity: f64, held: f64) -> Result<(), String> {
+        let start = *self.start_base.get_or_insert(held);
+        let run_base = held - start;
+        let after = match side {
+            Side::Buy => run_base + quantity,
+            Side::Sell => run_base - quantity,
+        };
+        // Toleranz 1 % der Ordermenge: Spot-Gebühren in der Basis-Währung lassen
+        // den Bestand leicht unter der gekauften Menge liegen.
+        if after < -(quantity * 0.01) {
+            return Err(format!(
+                "Long-only-Lauf: Verkauf {quantity} übersteigt die in diesem Lauf \
+                 gekaufte Menge {run_base} (Kurzposition nur bei erlaubten Shorts)"
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Prüft einen Positionsdeckel für die Position, die ein Lauf selbst aufbaut.
 ///
-/// Bestände, die schon vor dem Lauf im Konto lagen, zählen nicht dazu und werden nie
-/// verkauft: Beim ersten Check wird der Basis-Bestand als Ausgangspunkt gemerkt, der
-/// Lauf darf nur darüber hinaus kaufen und höchstens das Gekaufte wieder verkaufen.
+/// Die Laufposition wird SIGNIERT relativ zum Startbestand gemessen
+/// (`held - start`, Buy addiert, Sell subtrahiert). Der Deckel begrenzt
+/// `|Laufposition| × Preis` in BEIDE Richtungen. Ohne `allow_shorts` ist der
+/// Lauf long-only: Die Baseline (Startbestand) darf nicht unterschritten
+/// werden, Bestände aus der Zeit vor dem Lauf zählen nicht dazu und werden
+/// nie verkauft. Mit `allow_shorts` (Haussatz C.2: erst nach belegtem
+/// Long-Lauf) öffnet ein Sell bei flacher Position einen Short (OKX net
+/// mode, signierte Position).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ExposureLimit {
     cap: f64,
     start_base: Option<f64>,
+    allow_shorts: bool,
 }
 
 impl ExposureLimit {
@@ -144,38 +216,47 @@ impl ExposureLimit {
         Self {
             cap,
             start_base: None,
+            allow_shorts: false,
         }
     }
 
-    /// `held_base` ist der aktuelle Gesamtbestand (frei + gesperrt) der Basis-Währung.
+    /// Erlaubt Kurzpositionen: Sell-Signale dürfen die Baseline unterschreiten
+    /// (bis zum Deckel). Standard ist long-only.
+    #[must_use]
+    pub(crate) fn allow_shorts(mut self, allow: bool) -> Self {
+        self.allow_shorts = allow;
+        self
+    }
+
+    /// `held_base` ist die aktuelle NETTO-Position (signiert; bei Perpetuals
+    /// die Positionsgröße, bei Spot der Basis-Bestand).
     pub(crate) fn check(
         &mut self,
         side: Side,
         quantity: f64,
         price: f64,
-        held_base: f64,
+        held: f64,
     ) -> Result<(), String> {
-        let start = *self.start_base.get_or_insert(held_base);
-        let run_base = (held_base - start).max(0.0);
-        match side {
-            Side::Buy => {
-                let after = (run_base + quantity) * price;
-                if after > self.cap {
-                    return Err(format!(
-                        "Positionsdeckel überschritten: {after:.2} > {:.2}",
-                        self.cap
-                    ));
-                }
-            }
-            Side::Sell => {
-                // Toleranz 1 % der Ordermenge: Gebühren in der Basis-Währung lassen den
-                // Bestand leicht unter der gekauften Menge liegen.
-                if quantity > run_base + quantity * 0.01 {
-                    return Err(format!(
-                        "Verkauf {quantity} übersteigt die in diesem Lauf gekaufte Menge {run_base}"
-                    ));
-                }
-            }
+        let start = *self.start_base.get_or_insert(held);
+        let run_base = held - start;
+        let after = match side {
+            Side::Buy => run_base + quantity,
+            Side::Sell => run_base - quantity,
+        };
+        if after.abs() * price > self.cap + 1e-9 {
+            return Err(format!(
+                "Positionsdeckel überschritten: {} > {:.2} (Laufposition {after:+.4})",
+                after.abs() * price,
+                self.cap
+            ));
+        }
+        // Toleranz 1 % der Ordermenge: Spot-Gebühren in der Basis-Währung lassen
+        // den Bestand leicht unter der gekauften Menge liegen.
+        if !self.allow_shorts && after < -(quantity * 0.01) {
+            return Err(format!(
+                "Long-only-Lauf: Verkauf {quantity} übersteigt die in diesem Lauf \
+                 gekaufte Menge {run_base} (Kurzposition nur bei erlaubten Shorts)"
+            ));
         }
         Ok(())
     }

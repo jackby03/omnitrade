@@ -26,12 +26,64 @@ mod test_support;
 mod tests;
 
 pub(crate) use risk::{
-    account_equity, check_liquidation_distance, held_base, split_symbol, valid_mainnet_cap,
-    ExposureLimit,
+    account_equity, bewertungs_waehrung, check_liquidation_distance, held_base, split_symbol,
+    valid_mainnet_cap, ExposureLimit, LongOnlyGuard,
 };
 
 /// Maximale Anzahl Kerzen, die für die Skript-Auswertung vorgehalten werden.
 const MAX_CANDLE_BUFFER: usize = 500;
+
+/// Ohne Kerze gilt ein Kanal nach so vielen Intervallen als still.
+const FUNKSTILLE_INTERVALLE: u64 = 3;
+/// Untergrenze, damit ein 1m-Kanal nicht bei jedem Aussetzer nachlaedt.
+const FUNKSTILLE_MINDEST_SEKUNDEN: u64 = 60;
+
+/// Aktuelle Zeit in Millisekunden seit der Unix-Epoche.
+fn jetzt_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Sekunden eines Intervalls (`1m` -> 60, `4h` -> 14400).
+pub(crate) fn intervall_sekunden(interval: &str) -> u64 {
+    let (zahl, einheit) = interval.split_at(interval.len().saturating_sub(1));
+    let n: u64 = zahl.parse().unwrap_or(1).max(1);
+    match einheit {
+        "m" | "M" => n * 60,
+        "h" | "H" => n * 3_600,
+        "d" | "D" => n * 86_400,
+        "w" | "W" => n * 604_800,
+        _ => n,
+    }
+}
+
+/// Schweigt der Kanal so lange, dass die Schleife blind handelt?
+pub(crate) fn kanal_still(letzte_kerze_ms: u64, jetzt_ms: u64, intervall_s: u64) -> bool {
+    let grenze_s = (intervall_s * FUNKSTILLE_INTERVALLE).max(FUNKSTILLE_MINDEST_SEKUNDEN);
+    jetzt_ms.saturating_sub(letzte_kerze_ms) > grenze_s * 1_000
+}
+
+/// Baut den Kerzenpuffer nach einer Funkstille aus REST-Kerzen neu auf.
+///
+/// Die REST-Kerzen bringen den Bestand auf Stand; Kerzen, die der Puffer bereits
+/// juenger kennt (der Kanal lief wieder an), bleiben erhalten. Zeitstempel sind
+/// eindeutig, der Puffer bleibt bei [`MAX_CANDLE_BUFFER`] gedeckelt.
+pub(crate) fn puffer_aus_rest(alt: &[Candle], neu: Vec<Candle>) -> Vec<Candle> {
+    let mut alle = neu;
+    match alle.last().map(|c| c.timestamp_ms) {
+        Some(letzte) => alle.extend(alt.iter().filter(|c| c.timestamp_ms > letzte).cloned()),
+        None => alle = alt.to_vec(),
+    }
+    alle.sort_by_key(|c| c.timestamp_ms);
+    alle.dedup_by_key(|c| c.timestamp_ms);
+    if alle.len() > MAX_CANDLE_BUFFER {
+        let ueber = alle.len() - MAX_CANDLE_BUFFER;
+        alle.drain(..ueber);
+    }
+    alle
+}
 
 /// Quote-Währung, deren Bestand als Konto-Equity für den RiskGuard dient.
 /// Quote-Währungen für Symbole ohne Trennzeichen (`BTCUSDT`), längere zuerst, damit
@@ -95,6 +147,8 @@ pub struct LiveConfig<'a> {
     pub max_notional: Option<f64>,
     /// Kerzenlänge, auf der die Strategie läuft (z. B. "1m", "1h").
     pub interval: &'a str,
+    /// Erlaubt Kurzpositionen; der Deckel gilt dann in beide Richtungen.
+    pub allow_shorts: bool,
     /// Bereits geschlossene Kerzen, die die Indikatoren vorwärmen. Leer, wenn die Börse
     /// keine Historie liefert.
     pub warmup: &'a [Candle],
@@ -114,6 +168,9 @@ pub const MAINNET_HARD_CAP: f64 = 100.0;
 /// do not halt the loop. The loop continues monitoring for new signals.
 pub async fn live_loop(
     config: &LiveConfig<'_>,
+    // Abrechnungswaehrung des Instruments (`settleCcy`, z. B. USDC bei XPERP).
+    // `None` = die Quote des Symbols gilt (Spot bzw. Konto in der Quote-Waehrung).
+    settle_currency: Option<&str>,
     mut exchange_stream: impl ExchangeStream,
     exchange_trading: impl ExchangeTrading,
     risk_guard: &mut RiskGuard,
@@ -129,6 +186,7 @@ pub async fn live_loop(
         max_notional,
         interval,
         warmup,
+        allow_shorts,
     } = *config;
 
     // Mainnet nur mit gültigem Deckel (testnet-first, echtes Geld braucht eine Grenze).
@@ -144,7 +202,15 @@ pub async fn live_loop(
             )));
         }
     }
-    let mut exposure = max_notional.map(ExposureLimit::new);
+    let mut exposure = max_notional.map(|cap| ExposureLimit::new(cap).allow_shorts(allow_shorts));
+    // Long-only gilt AUCH ohne Deckel: die Bremse haengt nicht an --max-notional.
+    let mut long_only = LongOnlyGuard::new();
+    if allow_shorts {
+        warn!(
+            "Shorts aktiviert: Sell-Signale dürfen Kurzpositionen eröffnen \
+             (Positionsdeckel in beide Richtungen)"
+        );
+    }
 
     // Load and validate script file
     let script_content = fs::read_to_string(script_path)?;
@@ -166,7 +232,7 @@ pub async fn live_loop(
         .connect()
         .await
         .map_err(|e| LiveLoopError::ExchangeError(e.to_string()))?;
-    info!("Verbunden mit Binance ({:?})", network);
+    info!("Verbunden mit der Boerse ({:?})", network);
 
     // Candle buffer for script evaluation (auf MAX_CANDLE_BUFFER begrenzt)
     let mut candle_buffer: Vec<Candle> = warmup.to_vec();
@@ -174,6 +240,15 @@ pub async fn live_loop(
         status.record_candle(candle, "hold");
     }
     flush_status(status);
+
+    // Funkstille-Waechter: ein WebSocket, der nur noch schweigt, sieht wie ein
+    // laufender Prozess aus. Am 21.10.2026 stand die Schleife nach einem Lesefehler
+    // 5,5 h still (Statusdatei eingefroren, keine Order, kein Fehler).
+    let intervall_s = intervall_sekunden(interval);
+    // Die Vorwaerm-Kerzen sind Historie: der Waechter zaehlt ab Schleifenstart,
+    // sonst laedt jeder Start sofort unnoetig aus REST nach.
+    let mut letzte_kerze_ms = jetzt_ms();
+    let mut rest_nachgeladen = false;
 
     // Not-Aus wird bei jeder Kerze und im Sekundentakt geprüft, damit er auch
     // bei ruhigem Markt wirkt.
@@ -192,6 +267,33 @@ pub async fn live_loop(
                 if kill_switch::is_engaged(kill_file) {
                     return halt_trading(&exchange_trading, symbol, &mut exchange_stream).await;
                 }
+                if !kanal_still(letzte_kerze_ms, jetzt_ms(), intervall_s) {
+                    rest_nachgeladen = false;
+                    continue;
+                }
+                if rest_nachgeladen {
+                    continue;
+                }
+                rest_nachgeladen = true;
+                match exchange_stream
+                    .recent_candles(symbol, interval, MAX_CANDLE_BUFFER)
+                    .await
+                {
+                    Ok(kerzen) if !kerzen.is_empty() => {
+                        let vorher = candle_buffer.len();
+                        candle_buffer = puffer_aus_rest(&candle_buffer, kerzen);
+                        letzte_kerze_ms = candle_buffer
+                            .last()
+                            .map_or(letzte_kerze_ms, |c| c.timestamp_ms);
+                        warn!(
+                            "Kerzen-Kanal still - Puffer aus REST neu aufgebaut ({} -> {} Kerzen)",
+                            vorher,
+                            candle_buffer.len()
+                        );
+                    }
+                    Ok(_) => warn!("Kerzen-Kanal still und REST lieferte keine Kerzen"),
+                    Err(e) => warn!("Kerzen-Kanal still, REST-Nachladen fehlgeschlagen: {e}"),
+                }
                 continue;
             }
         };
@@ -205,11 +307,25 @@ pub async fn live_loop(
         {
             continue;
         }
+        letzte_kerze_ms = candle.timestamp_ms;
+        rest_nachgeladen = false;
         candle_buffer.push(candle.clone());
         if candle_buffer.len() > MAX_CANDLE_BUFFER {
             let overflow = candle_buffer.len() - MAX_CANDLE_BUFFER;
             candle_buffer.drain(..overflow);
         }
+        // Das Buch folgt der BOERSE: eine Position kann auch ohne diesen Lauf
+        // entstehen oder vergehen (Handschluss, Stop, ein zweiter Prozess). Der
+        // eigene Zaehler in record_order ist nur die Zwischenanzeige bis zur
+        // naechsten Kerze; scheitert der Abruf, bleibt der alte Wert stehen und
+        // wird geloggt - nie stillschweigend auf 0 gesetzt.
+        match exchange_trading.position_snapshot(symbol).await {
+            Ok(snapshot) => status.set_net_quantity(snapshot.base_qty),
+            Err(err) => {
+                warn!("Position nicht abrufbar ({err}) - Buch bleibt auf dem letzten Stand")
+            }
+        }
+
         trace!("Evaluating candle: {:?}", candle);
 
         // Evaluate strategy script against accumulated candles
@@ -250,7 +366,13 @@ pub async fn live_loop(
             &order_req,
             candle.close,
             initial_capital,
+            settle_currency,
             exposure.as_mut(),
+            if allow_shorts {
+                None
+            } else {
+                Some(&mut long_only)
+            },
         )
         .await
         {
@@ -339,18 +461,28 @@ pub(crate) async fn place_order_with_risk_check(
         current_price,
         initial_capital,
         None,
+        None,
+        None,
     )
     .await
 }
 
 /// Wie [`place_order_with_risk_check`], zusätzlich mit optionalem Positionsdeckel.
+///
+/// Acht Parameter, weil der Risikopfad alles braucht, was die Schleife ohnehin
+/// hält (Konto, Deckel, Long-only, Startkapital, Abrechnungswaehrung). Ein
+/// Struktur-Umbau waere hier Umbau ohne Gewinn - die Funktion hat zwei Aufrufer.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn place_order_guarded(
     exchange_trading: &impl ExchangeTrading,
     risk_guard: &mut RiskGuard,
     order_req: &OrderRequest,
     current_price: f64,
     initial_capital: f64,
+    // Abrechnungswaehrung des Instruments; `None` = Quote des Symbols.
+    settle_currency: Option<&str>,
     exposure: Option<&mut ExposureLimit>,
+    long_only: Option<&mut LongOnlyGuard>,
 ) -> Result<omnitrade_core::Order, LiveLoopError> {
     // Create mock order for risk checking
     let mock_order = omnitrade_core::Order {
@@ -419,10 +551,20 @@ pub(crate) async fn place_order_guarded(
         .await
         .map_err(|e| LiveLoopError::ExchangeError(format!("Position: {e}")))?;
     check_liquidation_distance(&position, order_req.side).map_err(LiveLoopError::RiskViolation)?;
-    let equity = account_equity(&balances, &base, &quote, current_price, &position);
+    // Bewertungswaehrung: bei XPERP traegt das Konto USDC, das Symbol sagt "USD".
+    // Ohne diese Aufloesung findet pair_equity keinen Bestand, die Equity faellt
+    // auf den uPnL zusammen und der Drawdown schiesst ins Millionenprozent.
+    let waehrung = bewertungs_waehrung(&balances, &quote, settle_currency);
+    let equity = account_equity(&balances, &base, waehrung, current_price, &position);
 
+    let held = held_base(&balances, &base, &position);
+    // Long-only zuerst: sie gilt unabhaengig davon, ob ein Deckel gesetzt ist.
+    if let Some(guard) = long_only {
+        guard
+            .check(order_req.side, order_req.quantity, held)
+            .map_err(LiveLoopError::RiskViolation)?;
+    }
     if let Some(limit) = exposure {
-        let held = held_base(&balances, &base, &position);
         limit
             .check(order_req.side, order_req.quantity, current_price, held)
             .map_err(LiveLoopError::RiskViolation)?;

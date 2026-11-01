@@ -72,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             quantity,
             max_notional_usd,
             confirm_real_money,
+            allow_shorts,
             status_file,
             interval,
         } => {
@@ -86,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 order_quantity: quantity,
                 max_notional_usd,
                 confirm_real_money,
+                allow_shorts,
                 status_file: status_file.as_deref(),
                 interval: &interval,
             })

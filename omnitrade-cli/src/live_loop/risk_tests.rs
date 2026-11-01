@@ -354,6 +354,59 @@ fn exposure_cap_sell_tolerates_fee_shortfall() {
 }
 
 #[test]
+fn exposure_cap_rejects_shorts_by_default() {
+    // Arrange: flacher Start, Standard-Lauf (long-only, Haussatz C.2).
+    let mut limit = ExposureLimit::new(200.0);
+
+    // Act: Sell bei flacher Position = Short-Eröffnung.
+    let err = limit.check(Side::Sell, 1.0, 100.0, 0.0);
+
+    // Assert
+    assert!(
+        matches!(&err, Err(m) if m.contains("übersteigt")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn exposure_cap_allows_shorts_when_enabled() {
+    let mut limit = ExposureLimit::new(200.0).allow_shorts(true);
+
+    // Short-Eröffnung: 1 @ 100 = 100 ≤ 200.
+    assert!(limit.check(Side::Sell, 1.0, 100.0, 0.0).is_ok());
+    // Short vergrößern: 200 ≤ 200.
+    assert!(limit.check(Side::Sell, 1.0, 100.0, -1.0).is_ok());
+    // Dritter Short: 300 > 200 → Deckel in beide Richtungen.
+    let over = limit.check(Side::Sell, 1.0, 100.0, -2.0);
+    assert!(
+        matches!(&over, Err(m) if m.contains("Positionsdeckel")),
+        "{over:?}"
+    );
+
+    // Buy schließt den Short (Reduktion ist immer erlaubt).
+    let mut back = ExposureLimit::new(200.0).allow_shorts(true);
+    back.check(Side::Sell, 1.0, 100.0, 0.0).expect("short");
+    assert!(back.check(Side::Buy, 1.0, 100.0, -1.0).is_ok());
+}
+
+#[test]
+fn exposure_cap_allows_flipping_own_long_into_short_when_enabled() {
+    // Ein Lauf, der 1 gekauft hat, darf sie schließen und ins Short drehen (Deckel 300).
+    let mut limit = ExposureLimit::new(300.0).allow_shorts(true);
+    assert!(limit.check(Side::Buy, 1.0, 100.0, 0.0).is_ok());
+    // Close + Short: 2 @ 100, Bestand 1 → Laufposition -1 = 100 ≤ 300.
+    assert!(limit.check(Side::Sell, 2.0, 100.0, 1.0).is_ok());
+    // Ohne erlaubte Shorts bliebe derselbe Flip abgelehnt.
+    let mut long_only = ExposureLimit::new(300.0);
+    long_only.check(Side::Buy, 1.0, 100.0, 0.0).expect("buy");
+    let flip = long_only.check(Side::Sell, 2.0, 100.0, 1.0);
+    assert!(
+        matches!(&flip, Err(m) if m.contains("übersteigt")),
+        "{flip:?}"
+    );
+}
+
+#[test]
 fn mainnet_cap_validation() {
     assert!(valid_mainnet_cap(Some(20.0)));
     assert!(valid_mainnet_cap(Some(MAINNET_HARD_CAP)));
@@ -424,4 +477,114 @@ async fn non_positive_cap_is_rejected_even_on_testnet() {
         .run(&[35000.0], Some(1000.0), Network::Testnet, 0.001)
         .await;
     assert!(matches!(result, Err(LiveLoopError::NetworkError(_))));
+}
+
+#[test]
+fn long_only_rejects_sell_without_position() {
+    // Ohne Deckel und ohne vorherigen Kauf darf ein Sell keine Kurzposition oeffnen.
+    let mut guard = LongOnlyGuard::new();
+    let r = guard.check(Side::Sell, 0.19, 0.0);
+    assert!(
+        r.is_err(),
+        "Sell bei flacher Position muss abgelehnt werden: {r:?}"
+    );
+}
+
+#[test]
+fn long_only_allows_sell_of_the_run_position() {
+    // Erst kaufen (Lauf-Baseline 0), dann genau die gekaufte Menge verkaufen.
+    let mut guard = LongOnlyGuard::new();
+    assert!(guard.check(Side::Buy, 5.0, 0.0).is_ok());
+    assert!(guard.check(Side::Sell, 5.0, 5.0).is_ok());
+}
+
+#[test]
+fn liquidation_beim_preis_null_sperrt_das_nachlegen_nicht() {
+    // OKX meldet liqPx "0", wenn es keine Liquidation gibt (1x isolated).
+    // Vorher machte der Parser daraus None und der Guard verweigerte JEDES
+    // Nachlegen ("Liquidationspreis oder Markpreis fehlt", Befund 21.10.2026).
+    let ohne_liq = PositionSnapshot {
+        is_perpetual: true,
+        base_qty: 0.1,
+        unrealized_pnl: 0.0,
+        liq_price: Some(0.0),
+        mark_price: Some(108.27),
+    };
+    assert!(
+        check_liquidation_distance(&ohne_liq, Side::Buy).is_ok(),
+        "ohne Liquidationspreis ist der Abstand 100 % - Nachlegen muss erlaubt sein"
+    );
+
+    // Gegenprobe: eine echte Liquidation dicht am Markpreis sperrt weiterhin.
+    let nah = PositionSnapshot {
+        is_perpetual: true,
+        base_qty: 0.1,
+        unrealized_pnl: 0.0,
+        liq_price: Some(106.0),
+        mark_price: Some(108.27),
+    };
+    assert!(
+        check_liquidation_distance(&nah, Side::Buy).is_err(),
+        "2,1 % Abstand zur Liquidation muss abgelehnt werden"
+    );
+}
+
+#[test]
+fn long_only_never_sells_pre_existing_stock() {
+    // Vorbestand 3: er zaehlt nicht zur Laufposition, ein Verkauf daraus scheitert.
+    let mut guard = LongOnlyGuard::new();
+    assert!(guard.check(Side::Buy, 1.0, 3.0).is_ok());
+    let r = guard.check(Side::Sell, 4.0, 4.0);
+    assert!(r.is_err(), "Vorbestand darf nicht verkauft werden: {r:?}");
+}
+
+/// XPERP traegt im Symbol `USD`, das Konto fuehrt USDC. Wer die Quote nimmt,
+/// findet keinen Bestand, bewertet das Konto mit 0 und der RiskGuard misst einen
+/// Drawdown von Millionen Prozent (gemessen 21.10.2026: 4.688.672 %).
+#[test]
+fn equity_nimmt_die_abrechnungswaehrung_wenn_die_quote_fehlt() {
+    let konto = |paare: &[(&str, f64)]| Account {
+        balances: paare
+            .iter()
+            .map(|(ccy, wert)| {
+                (
+                    (*ccy).to_string(),
+                    AccountBalance {
+                        free: *wert,
+                        locked: 0.0,
+                    },
+                )
+            })
+            .collect(),
+    };
+    let xperp = konto(&[("USDC", 46.43), ("SOL", 0.0)]);
+
+    // Act: Bewertungswaehrung und Equity eines offenen Shorts.
+    let waehrung = bewertungs_waehrung(&xperp, "USD", Some("USDC"));
+    let equity = account_equity(
+        &xperp,
+        "SOL",
+        waehrung,
+        106.46,
+        &PositionSnapshot {
+            is_perpetual: true,
+            base_qty: -0.1,
+            unrealized_pnl: -0.13,
+            liq_price: None,
+            mark_price: None,
+        },
+    );
+
+    // Assert: der Kontobestand zaehlt, nicht die leere Quote.
+    assert_eq!(waehrung, "USDC");
+    assert!(
+        (equity - 46.30).abs() < 1e-9,
+        "Equity muss 46.43 USDC + (-0.13) uPnL sein, war {equity}"
+    );
+
+    // Gegenprobe 1: traegt das Konto die Quote, bleibt sie die Bewertungswaehrung.
+    let swap = konto(&[("USDT", 100.0)]);
+    assert_eq!(bewertungs_waehrung(&swap, "USDT", Some("USDT")), "USDT");
+    // Gegenprobe 2: weder Quote noch Abrechnung vorhanden -> alte Regel, kein Panikwert.
+    assert_eq!(bewertungs_waehrung(&swap, "USD", Some("USDC")), "USD");
 }
