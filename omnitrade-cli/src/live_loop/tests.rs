@@ -315,12 +315,16 @@ async fn buch_uebernimmt_die_boersenposition_ohne_eigenen_auftrag() {
 #[tokio::test]
 async fn xperp_auftrag_wird_nicht_am_erfundenen_drawdown_abgelehnt() {
     // Arrange: Symbol sagt USD, Konto fuehrt USDC, Abrechnung ist USDC.
+    // Zwei Sell-Signale statt Kaeufe: Der Lauf kauft nur bei flat (wie der
+    // Backtest), und ein Verkauf ohne Long-Bestand braucht erlaubte Shorts -
+    // sonst greift die Long-only-Bremse, die hier nicht geprueft wird.
     // Die Attrappe wird je Kerze ZWEIMAL befragt: erst fuer das Buch, dann im
     // Risikopfad. Die Reihe ist deshalb so gelegt, dass der ERSTE Auftrag +0,05
     // uPnL sieht (das setzt den Peak) und der ZWEITE -0,50. Ohne die
     // Abrechnungswaehrung steht die Equity dann bei -0,50 gegen einen Peak von
     // 0,05 - der Guard misst 1100 % Drawdown und lehnt den zweiten Auftrag ab.
-    let h = Harness::new("xperp-usdc", BUY_BELOW_40K)
+    let h = Harness::new("xperp-usdc", SELL_ABOVE_40K)
+        .with_allow_shorts()
         .with_symbol("SOL-USD_UM_XPERP-310404")
         .with_settle("USDC")
         .with_konto_waehrung("USDC")
@@ -330,7 +334,7 @@ async fn xperp_auftrag_wird_nicht_am_erfundenen_drawdown_abgelehnt() {
 
     // Act
     let result = h
-        .run(&[35000.0, 36000.0], Some(46.43), Network::Testnet, 0.1)
+        .run(&[45000.0, 46000.0], Some(46.43), Network::Testnet, 0.1)
         .await;
 
     // Assert: BEIDE Auftraege gehen raus, statt am erfundenen Drawdown zu scheitern.

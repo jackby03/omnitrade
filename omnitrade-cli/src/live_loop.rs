@@ -355,12 +355,12 @@ pub async fn live_loop(
             continue;
         }
 
-        // Determine order side from signal. Verkauf nur bei offener Position, Kauf nur bei flat;
-        // sonst würde der Risk Guard jede Verkaufsorder ohne Position ablehnen.
+        // Determine order side from signal. Kauf nur bei flat; Verkauf nur bei offener
+        // Position, es sei denn Shorts sind erlaubt (dann öffnet er bei flat einen Short).
         let side = match signal {
             omnitrade_script::Signal::Buy if in_position => continue,
             omnitrade_script::Signal::Buy => Side::Buy,
-            omnitrade_script::Signal::Sell if !in_position => continue,
+            omnitrade_script::Signal::Sell if !in_position && !allow_shorts => continue,
             omnitrade_script::Signal::Sell => Side::Sell,
             omnitrade_script::Signal::Hold => continue,
         };
