@@ -262,8 +262,6 @@ pub async fn live_loop(
     // Not-Aus wird bei jeder Kerze und im Sekundentakt geprüft, damit er auch
     // bei ruhigem Markt wirkt.
     let mut kill_check = tokio::time::interval(Duration::from_secs(1));
-    // Long-only wie im Backtest: dieser Lauf hält höchstens eine Long-Position.
-    let mut in_position = false;
 
     // Main event loop: process each candle as it arrives
     loop {
@@ -328,12 +326,18 @@ pub async fn live_loop(
         // eigene Zaehler in record_order ist nur die Zwischenanzeige bis zur
         // naechsten Kerze; scheitert der Abruf, bleibt der alte Wert stehen und
         // wird geloggt - nie stillschweigend auf 0 gesetzt.
-        match exchange_trading.position_snapshot(symbol).await {
-            Ok(snapshot) => status.set_net_quantity(snapshot.base_qty),
-            Err(err) => {
-                warn!("Position nicht abrufbar ({err}) - Buch bleibt auf dem letzten Stand")
+        // Die signierte Boersenposition entscheidet ueber die Richtung des Auftrags.
+        // Scheitert der Abruf, bleibt das Buch stehen und dieser Lauf ordert nichts.
+        let net_position = match exchange_trading.position_snapshot(symbol).await {
+            Ok(snapshot) => {
+                status.set_net_quantity(snapshot.base_qty);
+                Some(snapshot.base_qty)
             }
-        }
+            Err(err) => {
+                warn!("Position nicht abrufbar ({err}) - Buch bleibt auf dem letzten Stand");
+                None
+            }
+        };
 
         trace!("Evaluating candle: {:?}", candle);
 
@@ -355,14 +359,12 @@ pub async fn live_loop(
             continue;
         }
 
-        // Determine order side from signal. Kauf nur bei flat; Verkauf nur bei offener
-        // Position, es sei denn Shorts sind erlaubt (dann öffnet er bei flat einen Short).
-        let side = match signal {
-            omnitrade_script::Signal::Buy if in_position => continue,
-            omnitrade_script::Signal::Buy => Side::Buy,
-            omnitrade_script::Signal::Sell if !in_position && !allow_shorts => continue,
-            omnitrade_script::Signal::Sell => Side::Sell,
-            omnitrade_script::Signal::Hold => continue,
+        let Some(net) = net_position else {
+            warn!("Keine Position bekannt - Auftrag wird ausgelassen (fail closed)");
+            continue;
+        };
+        let Some(side) = order_side(signal, net, allow_shorts) else {
+            continue;
         };
 
         let order_req = OrderRequest::market(symbol.to_string(), side, order_quantity);
@@ -388,7 +390,6 @@ pub async fn live_loop(
             Ok(order) => {
                 info!("Order filled: {:?}", order);
                 let side_name = if side == Side::Buy { "buy" } else { "sell" };
-                in_position = side == Side::Buy;
                 status.record_order(side_name, order_quantity, candle.close, "placed", "");
                 flush_status(status);
             }
@@ -415,6 +416,24 @@ pub async fn live_loop(
         .map_err(|e| LiveLoopError::ExchangeError(e.to_string()))?;
 
     Ok(())
+}
+
+/// Richtung des Auftrags aus Signal und signierter Boersenposition (`net`: > 0 long,
+/// < 0 short, 0 flat). Wie im Backtest: kein Nachkauf, ein Gegensignal schliesst die
+/// offene Position, ein Verkauf bei flat eroeffnet nur mit erlaubten Shorts.
+pub(crate) fn order_side(
+    signal: omnitrade_script::Signal,
+    net: f64,
+    allow_shorts: bool,
+) -> Option<Side> {
+    match signal {
+        omnitrade_script::Signal::Buy if net > 0.0 => None,
+        omnitrade_script::Signal::Buy => Some(Side::Buy),
+        omnitrade_script::Signal::Sell if net < 0.0 => None,
+        omnitrade_script::Signal::Sell if net == 0.0 && !allow_shorts => None,
+        omnitrade_script::Signal::Sell => Some(Side::Sell),
+        omnitrade_script::Signal::Hold => None,
+    }
 }
 
 /// Storniert alle offenen Orders des Symbols. Fremde Symbole bleiben unberührt.
