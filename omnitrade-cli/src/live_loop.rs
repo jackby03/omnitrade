@@ -202,7 +202,16 @@ pub async fn live_loop(
             )));
         }
     }
-    let mut exposure = max_notional.map(|cap| ExposureLimit::new(cap).allow_shorts(allow_shorts));
+    // OMNITRADE_ADOPT_POSITION=1: die bei Start offene Position gehoert dem Lauf.
+    let adopt = std::env::var("OMNITRADE_ADOPT_POSITION").is_ok_and(|v| v == "1");
+    if adopt {
+        warn!("OMNITRADE_ADOPT_POSITION=1: bestehende Position wird als Laufposition uebernommen");
+    }
+    let mut exposure = max_notional.map(|cap| {
+        ExposureLimit::new(cap)
+            .allow_shorts(allow_shorts)
+            .adopt_existing(adopt)
+    });
     // Long-only gilt AUCH ohne Deckel: die Bremse haengt nicht an --max-notional.
     let mut long_only = LongOnlyGuard::new();
     if allow_shorts {
@@ -512,6 +521,9 @@ pub(crate) async fn place_order_guarded(
         initial: f64,
         current: f64,
         pnl: f64,
+        /// Equity des LAUF-Kapitals: deklariertes Startkapital + uPnL der eigenen
+        /// Position. Das Konto ist geteilt und taugt nicht als Drawdown-Basis.
+        run_equity: f64,
     }
 
     impl omnitrade_risk::guard::AccountInfo for SimpleAccount {
@@ -525,6 +537,10 @@ pub(crate) async fn place_order_guarded(
 
         fn initial_balance(&self) -> f64 {
             self.initial
+        }
+
+        fn drawdown_equity(&self) -> f64 {
+            self.run_equity
         }
     }
 
@@ -573,12 +589,33 @@ pub(crate) async fn place_order_guarded(
         initial: initial_capital,
         current: equity,
         pnl: equity - initial_capital,
+        // Perpetuals (mit Abrechnungswaehrung) teilen sich das Konto mit anderen Spuren: dort zaehlt nur das
+        // Laufkapital plus der eigene uPnL. Spot bleibt bei der Paar-Equity (der
+        // Wertverlust der gekauften Basis ist dort der Verlust des Laufs).
+        run_equity: if position.is_perpetual && settle_currency.is_some() {
+            initial_capital + position.unrealized_pnl
+        } else {
+            equity
+        },
     };
 
     // Check risk guard
     risk_guard
         .check_order(&mock_order, &account, current_price)
-        .map_err(|e| LiveLoopError::RiskViolation(e.to_string()))?;
+        .map_err(|e| {
+            // Der Guard misst das KONTO (alle Spuren auf demselben Konto), nicht das
+            // Kapital dieses Laufs. Bei einer Ablehnung gehoeren Spitze, Basis und
+            // aktuelle Equity ins Log - sonst bleibt die Ursache (Abbuchung, andere
+            // Spur, uPnL) hinterher nicht mehr feststellbar.
+            tracing::warn!(
+                peak_equity = risk_guard.peak_equity(),
+                run_baseline = ?risk_guard.run_baseline(),
+                equity = equity,
+                declared_initial = initial_capital,
+                "RiskGuard lehnt ab: {e}"
+            );
+            LiveLoopError::RiskViolation(e.to_string())
+        })?;
 
     // Risk check passed; submit order to exchange
     exchange_trading
