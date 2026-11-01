@@ -17,9 +17,7 @@
 
 use omnitrade_core::Side;
 use omnitrade_exchange::okx::InstType;
-use omnitrade_exchange::{
-    ApiCredentials, ExchangeTrading, Network, OkxRestClient, OrderRequest,
-};
+use omnitrade_exchange::{ApiCredentials, ExchangeTrading, Network, OkxRestClient, OrderRequest};
 
 const DEFAULT_SYMBOL: &str = "SOL-USD_UM_XPERP-310404";
 const DEFAULT_BASE_QTY: f64 = 0.19; // 0.19 SOL @ ~106.4 = ~20.2 USDC
@@ -89,13 +87,12 @@ fn main() {
             "{}/api/v5/market/tickers?instType=FUTURES",
             base.trim_end_matches('/')
         );
-        let body: serde_json::Value =
-            reqwest::get(&url)
-                .await
-                .expect("tickers get")
-                .json()
-                .await
-                .expect("tickers json");
+        let body: serde_json::Value = reqwest::get(&url)
+            .await
+            .expect("tickers get")
+            .json()
+            .await
+            .expect("tickers json");
         let mark: f64 = body["data"]
             .as_array()
             .and_then(|arr| {
@@ -130,39 +127,56 @@ fn main() {
         // 4) LONG-Market-Order (Menge in Base-Waehrung; Adapter rechnet in Kontrakte um)
         let buy = client
             .place_order(&OrderRequest::market(symbol.into(), Side::Buy, base_qty))
-            .await
-            .expect("market buy");
-        println!("Market-Buy GEFUEHRT: ordId={} ({} Base)", buy.id, base_qty);
+            .await;
+        match &buy {
+            Ok(o) => println!("Market-Buy GEFUEHRT: ordId={} ({} Base)", o.id, base_qty),
+            Err(e) => eprintln!("Market-Buy fehlgeschlagen: {e}. Pruefe Position und Konto."),
+        }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-        // 5) Position lesen
-        let pos = client
-            .position_snapshot(symbol)
-            .await
-            .expect("position_snapshot");
+        // 5) Position lesen und ggf. schliessen. Kein Panic: eine offene Position
+        //    darf nicht unbemerkt bleiben.
+        let pos = match client.position_snapshot(symbol).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("position_snapshot fehlgeschlagen: {e}. Nichts wird blind geschlossen.");
+                std::process::exit(9);
+            }
+        };
         println!(
-            "POSITION OFFEN: pos={} (Basis) upl={} liqPx={:?} markPx={:?}",
+            "POSITION: pos={} (Basis) upl={} liqPx={:?} markPx={:?}",
             pos.base_qty, pos.unrealized_pnl, pos.liq_price, pos.mark_price
         );
-        if pos.base_qty <= 0.0 {
-            eprintln!("Position nach Buy nicht offen (pos={}): SCHLIESSEN und melden.", pos.base_qty);
-        }
 
-        // 6) Schliessen (gleiche Base-Menge)
-        let sell = client
-            .place_order(&OrderRequest::market(symbol.into(), Side::Sell, base_qty))
-            .await
-            .expect("market sell");
-        println!("Market-Sell GEFUEHRT: ordId={}", sell.id);
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        let after = client
-            .position_snapshot(symbol)
-            .await
-            .expect("position_snapshot after");
-        println!(
-            "Position nach Schliessen: pos={} (erwartet 0)",
-            after.base_qty
-        );
+        // 6) Schliessen. Verkauft hoechstens die tatsaechlich offene Menge (nie mehr,
+        //    sonst entstuende ein Short) und prueft danach erneut.
+        if pos.base_qty > 0.0 {
+            let sell_qty = pos.base_qty.min(base_qty);
+            match client
+                .place_order(&OrderRequest::market(symbol.into(), Side::Sell, sell_qty))
+                .await
+            {
+                Ok(o) => println!("Market-Sell GEFUEHRT: ordId={} ({sell_qty} Base)", o.id),
+                Err(e) => {
+                    eprintln!("Market-Sell fehlgeschlagen: {e}. Position manuell schliessen!")
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+        match client.position_snapshot(symbol).await {
+            Ok(after) if after.base_qty <= 0.0 => println!("Position nach Schliessen: flach"),
+            Ok(after) => {
+                eprintln!(
+                    "WARNUNG: Position noch offen (pos={}). Manuell schliessen!",
+                    after.base_qty
+                );
+                std::process::exit(10);
+            }
+            Err(e) => {
+                eprintln!("WARNUNG: Endstand nicht lesbar ({e}). Position im Konto pruefen!");
+                std::process::exit(11);
+            }
+        }
     });
     println!("ROUNDTRIP ABGESCHLOSSEN");
 }

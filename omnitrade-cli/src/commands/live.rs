@@ -123,20 +123,14 @@ pub async fn handle_live(args: &LiveArgs<'_>) -> Result<(), Box<dyn std::error::
             return Err("Grid-Live auf Mainnet ist gesperrt (nur Testnet)".into());
         }
         if is_contract_symbol(symbol) {
-            // Perpetuals tragen Liquidationsrisiko ueber Spot hinaus: deshalb eine
-            // eigene, ausdrueckliche Freigabe NEBEN OMNITRADE_MAINNET_APPROVED,
-            // --confirm-real-money und dem Mainnet-Deckel. Der harte Demo-Verifikations-
-            // Block entfaellt mit Auftrag Max 21.10.2026 (EEA-Demo-Konto hat keine
-            // Derivate-Berechtigung, Live-Roundtrip SOL-USD_UM_XPERP-310404 mit
-            // 20.20 USDC zu 1x ist am selben Tag belegt, ordId 4027816189234106368).
-            if std::env::var("OMNITRADE_PERP_MAINNET_APPROVED").is_err() {
-                return Err(
-                    "Perpetual (SWAP/XPERP) auf Mainnet braucht die zusätzliche Freigabe \
-                     OMNITRADE_PERP_MAINNET_APPROVED (Liquidationsrisiko) neben \
-                     OMNITRADE_MAINNET_APPROVED und --confirm-real-money"
-                        .into(),
-                );
-            }
+            // Perpetuals bleiben auf Mainnet gesperrt: Der Live-Pfad uebergibt keine
+            // Stop-Loss-Orders an die Boerse, und eine perpspezifische Notional-
+            // Obergrenze fehlt. Freigabe erst durch Max, wenn beides umgesetzt ist.
+            return Err(
+                "SWAP/XPERP auf Mainnet ist gesperrt: Stop-Loss-Orders an die Boerse \
+                 und perpspezifische Notional-Obergrenze fehlen noch (Freigabe durch Max ausstehend)"
+                    .into(),
+            );
         }
         if !valid_mainnet_cap(max_notional) {
             return Err(format!(
@@ -666,16 +660,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mainnet_perp_needs_the_perp_approval() {
-        // Der Mainnet-Umgebungs-Check steht NACH dem Perp-Gate, daher ist dieser
-        // Test unabhaengig von OMNITRADE_MAINNET_APPROVED aussagekraeftig.
-        if std::env::var("OMNITRADE_PERP_MAINNET_APPROVED").is_ok() {
-            return; // Rechner mit gesetzter Freigabe: Test nicht aussagekräftig.
-        }
+    async fn mainnet_perp_stays_blocked_even_with_all_approvals() {
+        // Die Sperre greift vor den Umgebungs-Checks und ist daher unabhaengig
+        // von OMNITRADE_MAINNET_APPROVED und OMNITRADE_PERP_MAINNET_APPROVED.
         let mut args = mainnet("okx", None, Some(20.0), true);
         args.symbol = "SOL-USD_UM_XPERP-310404";
         let err = rejected(args).await;
-        assert!(err.contains("OMNITRADE_PERP_MAINNET_APPROVED"), "{err}");
+        assert!(err.contains("gesperrt"), "{err}");
     }
 
     #[tokio::test]
