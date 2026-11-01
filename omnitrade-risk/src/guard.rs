@@ -14,6 +14,16 @@ pub trait AccountInfo {
 
     /// Initial account balance
     fn initial_balance(&self) -> f64;
+
+    /// Equity, an der der Drawdown gemessen wird. Vorgabe: die Konto-Equity.
+    ///
+    /// Ein Live-Lauf auf einem GETEILTEN Konto ueberschreibt das mit der Equity
+    /// seines eigenen Kapitals: die Konto-Equity bewegt sich durch fremde
+    /// Spuren, Ein- und Auszahlungen (31.10.2026: 140 -> 288 -> 246 USD bei
+    /// 50 USD Laufkapital) und sperrt sonst jeden Auftrag.
+    fn drawdown_equity(&self) -> f64 {
+        self.total_equity()
+    }
 }
 
 /// Validates orders against risk limits before execution.
@@ -79,10 +89,11 @@ impl RiskGuard {
         account: &dyn AccountInfo,
         current_price: f64,
     ) -> Result<(), RiskViolation> {
-        // Update peak equity tracking
+        // Update peak equity tracking (Drawdown-Equity, siehe AccountInfo)
         let current_equity = account.total_equity();
-        if current_equity > self.peak_equity {
-            self.peak_equity = current_equity;
+        let dd_equity = account.drawdown_equity();
+        if dd_equity > self.peak_equity {
+            self.peak_equity = dd_equity;
         }
         if self.track_run_baseline && self.run_baseline.is_none() {
             self.run_baseline = Some(current_equity);
@@ -92,7 +103,7 @@ impl RiskGuard {
         self.check_position_size(order, current_price)?;
 
         // Check drawdown limit
-        self.check_drawdown(current_equity)?;
+        self.check_drawdown(dd_equity)?;
 
         // Check daily loss limit (simplified: using current PnL as daily loss)
         self.check_daily_loss(account)?;

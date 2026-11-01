@@ -220,6 +220,18 @@ impl ExposureLimit {
         }
     }
 
+    /// Uebernimmt den Bestand beim Start als Laufposition (Baseline 0 statt
+    /// Bestand beim ersten Auftrag). Fuer den Neustart eines Laufs, dessen
+    /// Position an der Boerse offen blieb: sonst bliebe sie "fremd" und der
+    /// Lauf koennte sie nie schliessen. Der Deckel zaehlt sie dann mit.
+    #[must_use]
+    pub(crate) fn adopt_existing(mut self, adopt: bool) -> Self {
+        if adopt {
+            self.start_base = Some(0.0);
+        }
+        self
+    }
+
     /// Erlaubt Kurzpositionen: Sell-Signale dürfen die Baseline unterschreiten
     /// (bis zum Deckel). Standard ist long-only.
     #[must_use]
