@@ -1,104 +1,93 @@
 ---
 name: run-omnitrade
-description: Run, start, build, drive and screenshot the omnitrade desktop app (omnitrade-ui, egui) and its CLI (omnitrade-cli validate/backtest). Use when asked to run, start, launch, screenshot, click through, test the GUI, press the NOT-AUS / kill switch, or smoke-test a strategy backtest.
+description: Run, start, build, drive, click through and screenshot the omnitrade desktop app (omnitrade-ui, egui) and its CLI (omnitrade-cli validate, backtest, kill). Use when asked to run, start, launch, build, screenshot, click through, test the GUI, press or reset the NOT-AUS / kill switch, or smoke-test a strategy backtest.
 ---
 
 # run-omnitrade
 
-omnitrade ist ein Rust-Workspace: `omnitrade-ui` (egui/eframe-Desktop-GUI, reine Anzeige plus Not-Aus-Flag-Datei) und `omnitrade-cli` (validate, backtest, live, kill). Die GUI wird unter einem virtuellen X-Server (Xvfb) gestartet und per `xdotool` bedient; Screenshots entstehen mit ImageMagick `import`.
+omnitrade ist ein Rust-Workspace: `omnitrade-ui` (egui-Desktop-GUI, reine Anzeige plus Not-Aus-Flag-Datei) und `omnitrade-cli` (validate, backtest, live, kill). Der Agent-Pfad ist ein PowerShell-Driver, der die GUI startet, sie per Screenshot festhält, den Not-Aus klickt und die Flag-Datei prüft.
 
-**Pfade in dieser Datei sind relativ zum Repo-Root** `/home/user/omnitrade` (dort liegt `Cargo.toml`).
+**Pfade in dieser Datei sind relativ zum Repo-Root** `O:\Werkstatt\omnitrade` (dort liegt `Cargo.toml`). Getestet auf Windows 11, PowerShell 5.1 (`powershell.exe`), Rust/cargo 1.98.1.
 
 ## Agent-Pfad (zuerst lesen)
 
-Alles läuft über den Driver `.claude/skills/run-omnitrade/driver.sh`:
+Alles läuft über `.claude/skills/run-omnitrade/driver.ps1`. Aufruf aus dem Repo-Root:
 
 ```bash
-.claude/skills/run-omnitrade/driver.sh build      # cargo build --workspace
-.claude/skills/run-omnitrade/driver.sh flow       # Xvfb + GUI + Screenshot + NOT-AUS setzen/zuruecksetzen
-.claude/skills/run-omnitrade/driver.sh cli        # OKX-Kerzen holen, validate, Backtest
-.claude/skills/run-omnitrade/driver.sh stop       # GUI und Xvfb beenden
+powershell -NoProfile -ExecutionPolicy Bypass -File .claude/skills/run-omnitrade/driver.ps1 build
+powershell -NoProfile -ExecutionPolicy Bypass -File .claude/skills/run-omnitrade/driver.ps1 flow
+powershell -NoProfile -ExecutionPolicy Bypass -File .claude/skills/run-omnitrade/driver.ps1 cli
+powershell -NoProfile -ExecutionPolicy Bypass -File .claude/skills/run-omnitrade/driver.ps1 stop
 ```
 
 Einzelbefehle: `start`, `shot [name]`, `killswitch`, `reset`, `status`, `fetch`.
 
+- `flow` = `start` → Screenshot `01_start.png` → `killswitch` → `reset` → `status`. Exit 0 heißt: Flag-Datei gesetzt und danach wieder weg.
 - Screenshots: `target/run-omnitrade/*.png` (`01_start.png`, `after_killswitch.png`, `after_reset.png`). Nach jedem Schritt mit `Read` ansehen, nicht nur den Exit-Code prüfen.
-- Ein eigener Befehl: `driver.sh shot mein_name` erzeugt `target/run-omnitrade/mein_name.png`.
-- Eigene Klicks: `xdotool mousemove --window "$(xdotool search --name omnitrade | head -1)" X Y click 1` mit `DISPLAY=:99`. Koordinaten relativ zum Fenster (Fenster bei 0,0, 1280x800).
-- Die GUI läuft mit `OMNITRADE_KILL_FILE=target/run-omnitrade/omnitrade.kill`, damit das Flag-File nicht in `/tmp` landet.
-
-Erwartete Ergebnisse von `flow`:
-- `01_start.png`: OKX-BTC-USDT-Kerzen (199 historische Kerzen), Kopfzeile `getrennt`, `NOT-AUS` rot.
-- Nach `killswitch`: Kopfzeile `NOT-AUS GESETZT` plus Button `Zurücksetzen`, Datei `omnitrade.kill` existiert.
-- Nach `reset`: Datei weg, `NOT-AUS` wieder frei.
+- Eigener Screenshot: `driver.ps1 shot mein_name` erzeugt `target/run-omnitrade/mein_name.png`.
+- Erwartete Zustände:
+  - `01_start.png`: Kopfzeile `verbunden`, `NOT-AUS` rot, Kerzen und Orderbuch sichtbar, Logzeile `199 historische Kerzen geladen`.
+  - Nach `killswitch`: Kopfzeile `NOT-AUS GESETZT` plus Button `Zurücksetzen`; `target/run-omnitrade/omnitrade.kill` existiert.
+  - Nach `reset`: Datei weg, `status` zeigt `NOT-AUS: frei`.
+- Der Driver setzt `OMNITRADE_KILL_FILE` auf `target/run-omnitrade/omnitrade.kill`. Die GUI und ihre Kindprozesse schreiben damit nie in die echte Not-Aus-Datei (`%TEMP%\omnitrade.kill`) der laufenden Live-Schleifen.
 
 ## Prerequisites
 
-Einmalig, als root, im Linux-Container der Session. Diese Zeile habe ich ausgeführt, Exit 0:
-
-```bash
-apt-get update -qq && apt-get install -y -qq libxkbcommon0 libxkbcommon-x11-0 libxcb-xkb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 libxcb-cursor0 libxi6 libxcursor1 libxrandr2 libxinerama1 libgl1 libegl1 libwayland-client0 x11-apps imagemagick xdotool
-```
-
-Xvfb, `curl`, `python3`, Rust (cargo 1.97.0 getestet) müssen vorhanden sein.
+Nichts installieren. Vorhanden und geprüft: `cargo` (1.98.1), `powershell.exe` 5.1. Der Driver braucht kein Python und keinen Docker. Der Kerzenabruf läuft über `Invoke-RestMethod` gegen OKX (Port 443).
 
 ## Build
 
 ```bash
-cargo build --workspace
+powershell -NoProfile -ExecutionPolicy Bypass -File .claude/skills/run-omnitrade/driver.ps1 build
 ```
 
-Erwartung: `Finished dev profile`. Erststart kann mehrere Minuten dauern (Abhängigkeiten).
+Erwartung: `Finished \`dev\` profile`. Erststart 1m18s, danach inkrementell etwa 3 s. Ergebnis: `target/debug/omnitrade-cli.exe` und `target/debug/omnitrade-ui.exe`.
 
 ## Run: CLI (headless, kein Display nötig)
 
 ```bash
-./target/debug/omnitrade-cli validate --script .claude/skills/run-omnitrade/sample_buy.omni
-./target/debug/omnitrade-cli backtest --script .claude/skills/run-omnitrade/sample_buy.omni --data target/run-omnitrade/btc_1h.csv --initial-balance 1000000
+powershell -NoProfile -ExecutionPolicy Bypass -File .claude/skills/run-omnitrade/driver.ps1 cli
 ```
 
-- Erwartung `validate`: `Script validation successful`, Exit 0. Fehlerhafte Syntax: `ParseError`, Exit 1.
-- Erwartung `backtest`: Tabelle `=== Backtest Results ===`, Exit 0.
-- `driver.sh cli` holt die Kerzen (`fetch`) und führt beides aus.
+`cli` holt die letzten 100 OKX-Kerzen BTC-USDT 1H nach `target/run-omnitrade/btc_1h.csv`, validiert `sample_buy.omni` und `sample_rsi.omni` und führt zwei Backtests mit `--initial-balance 1000000` aus.
 
-## Run: GUI (Agent-Pfad über Driver)
-
-```bash
-.claude/skills/run-omnitrade/driver.sh flow
-```
-
-Der Driver startet Xvfb auf `:99`, dann `./target/debug/omnitrade-ui BTC-USDT testnet --exchange okx`, wartet auf das Fenster und klickt NOT-AUS bzw. Zurücksetzen.
+- Erwartung `validate`: `Script validation successful`, Exit 0.
+- Erwartung `backtest`: Block `=== Backtest Results ===`, Exit 0. Auf diesem Stand liefert `sample_buy` einen Trade, `sample_rsi` zwei Trades.
 
 ## Run: GUI (Mensch-Pfad)
 
-Auf einem Rechner mit echtem Display dasselbe Binary `omnitrade-ui` mit den Argumenten `BTC-USDT testnet --exchange okx` starten. Im Container nur über Xvfb getestet, nicht auf Windows/macOS.
+Dasselbe Binary direkt starten, ohne Flag-Datei-Umleitung. Achtung: dann greift der Not-Aus die echte Live-Datei `%TEMP%\omnitrade.kill`.
+
+```bash
+target/debug/omnitrade-ui.exe BTC-USDT testnet --exchange okx
+```
 
 ## Gotchas
 
-- **Binance ist aus diesem Container gesperrt** (`testnet.binance.vision` und `api.binance.com` liefern HTTP 451). Deshalb `--exchange okx` verwenden.
-- **OKX-WebSocket ist nicht erreichbar.** `wss://ws.okx.com:8443` wird vom Proxy nach ca. 7 s mit Code 1006 geschlossen (Proxy-Log: `ws_closed_mid_exchange`). REST auf Port 443 funktioniert. Folge: Kopfzeile `getrennt`, `Orderbook empty`, keine Live-Ticker. Die GUI ist in diesem Container nur mit historischen REST-Kerzen prüfbar. Ob das an der Umgebungs-Netzwerkpolicy oder am Proxy liegt, ist nicht abschließend geklärt.
-- **Die GUI braucht `libxkbcommon-x11`.** Ohne sie bricht sie in `winit` mit `Library libxkbcommon-x11.so could not be loaded` ab, bevor ein Fenster erscheint.
-- **Keine `pkill -f` / `pgrep -f` mit dem Skript- oder Befehlsnamen.** Das Muster trifft die eigene Shell, Exit 144. Stattdessen `pgrep -x omnitrade-ui` bzw. `pgrep -x Xvfb`.
-- **Hintergrundprozesse brauchen `</dev/null` und eigene Redirects.** Sonst hält die GUI die stdout-Pipe des Aufrufers offen, und der Befehl kehrt nie zurück. Der Driver macht das bereits so.
-- **Backtest mit Indikatoren ist auf HEAD defekt.** `strategie.omni` mit `rsi(14)` liefert `EvalError: insufficient candles (1) for rsi with period 14`, obwohl 100 Kerzen geladen sind. Der Warmup-Fix liegt in `origin/main` (Commit `e63ef02`, `fix(backtest): indicator warmup skip`) und ist nicht in HEAD. Ein Cherry-pick kollidiert mit HEAD in `omnitrade-cli/src/backtest.rs` und `omnitrade-engine/src/account.rs`. Im Driver steht deshalb nur ein Smoke-Test ohne Indikator.
-- **Backtest-Standardguthaben 10 000 reicht nicht.** Die Standardgröße (1 BTC bei ca. 81 000 USD) liefert `InsufficientBalance { required: ..., available: 10000.0 }`. `--initial-balance 1000000` setzen.
-- **Der Kill-Switch-Pfad ist `$TMPDIR`-abhängig.** Ohne `OMNITRADE_KILL_FILE` schreibt die GUI nach `temp_dir()/omnitrade.kill`. Der Driver setzt die Variable.
-- **Klickpunkte sind layoutabhängig.** `NOT-AUS` bei (381,11), `Zurücksetzen` bei (504,11). Nach einer UI-Änderung neu per Screenshot prüfen und die Konstanten in `driver.sh` anpassen.
+- **Der Not-Aus ist eine Datei, kein Prozess-Signal.** Der Button schreibt `OMNITRADE_KILL_FILE` (oder `%TEMP%\omnitrade.kill`). Laufende `omnitrade-cli live`-Schleifen beobachten diese Datei, stornieren offene Orders und stoppen. Der Driver isoliert die Datei, aber ein Lauf ohne Driver trifft die echten Live-Schleifen. Vor einem manuellen Klick `driver.ps1 status` lesen und prüfen, welche Live-Prozesse laufen.
+- **Der erste Klick nach einer Mausbewegung geht bei egui oft verloren.** Der Driver klickt deshalb bis zu dreimal und prüft nach jedem Klick die Flag-Datei. Ein fester Doppelklick schaltet den Not-Aus hin und her (im Test: mehrfach `gesetzt`/`aufgehoben` im Log). Nicht zurück zum Doppelklick.
+- **Klickpunkte sind relativ zur Fensterecke oben links (inklusive Titelleiste) in physischen Pixeln.** Der Driver setzt `SetProcessDPIAware`. `NOT-AUS` liegt bei (398, 42), `Zurücksetzen` bei (522, 42). Nach einer UI-Änderung per Screenshot prüfen und die Konstanten `$KillXY`/`$ResetXY` in `driver.ps1` anpassen.
+- **Der Driver bringt das Fenster mit `SetForegroundWindow` nach vorn.** Das ist keine Pflicht für den Klick, schadet aber nicht.
+- **Der Reset-Klick ist ein Fallback-Fall.** Einmal kam der GUI-Klick nicht durch. Der Driver meldet dann `WARNUNG: GUI-Klick auf den Reset-Knopf ohne Wirkung` und hebt die Flag-Datei über `omnitrade-cli kill --reset` auf. Das ist dieselbe Datei und dasselbe Protokoll. Das Log der GUI zeigt in dem Fall keinen Eintrag `Not-Aus aufgehoben`.
+- **Die Live-Statusanzeige ist eine Momentaufnahme.** Die GUI liest `status/live.json` (Standard `status/live.json` relativ zum Start-Verzeichnis, Überschreibung über `OMNITRADE_STATUS`). `running` heißt nur, dass die Datei so geschrieben wurde. Ob der Prozess lebt, zeigt `Get-Process omnitrade-cli`.
+- **Backtest-Standardguthaben 10 000 reicht nicht.** Die Standardgröße (1 BTC bei etwa 81 000 USD) liefert `InsufficientBalance { required: 80928.55, available: 10000.0 }`. Deshalb `--initial-balance 1000000` setzen. Geprüft am 31.10.2026.
+- **Indikator-Backtests laufen auf diesem Stand.** `sample_rsi.omni` mit `rsi(14)` läuft durch, weil der Warmup-Fix `e63ef02` im HEAD enthalten ist. Eine ältere Notiz zum Warmup-Bug gilt nur für einen früheren Stand.
+- **OKX ist von diesem Host aus erreichbar.** REST (`/api/v5/market/history-candles`) und WebSocket (Kopfzeile `verbunden`, Live-Orderbuch) liefen im Test. Die früher beschriebene Sperre gilt für den Linux-Container, nicht für diesen Host.
+- **Der Konto-Hinweis `Konto-Anzeige gibt es nur für Binance (gewählt: okx)` ist erwartet.** Mit `--exchange okx` gibt es keine Kontoanzeige. Binance wurde auf diesem Host nicht geprüft.
 
 ## Troubleshooting
 
 | Symptom | Ursache | Fix |
 |---|---|---|
-| `Library libxkbcommon-x11.so could not be loaded` | fehlendes Paket | Prerequisites-Zeile ausführen |
-| `unable to open X server` (import) | Xvfb läuft nicht | `driver.sh start` oder `driver.sh flow` |
-| `kein GUI-Fenster nach 40 s` | GUI abgestürzt | `target/run-omnitrade/ui.log` lesen |
-| `insufficient candles (1) for rsi` | Warmup-Bug in HEAD | Strategie ohne Indikator testen oder `main` mergen (siehe Gotchas) |
+| `kein GUI-Fenster nach 40 s` | GUI startet nicht oder stürzt ab | `target/run-omnitrade/ui.err.log` und `ui.log` lesen |
+| `Flag-Datei fehlt nach Klick auf NOT-AUS` | Klick kam nicht an | erneut `killswitch` (wiederholt bis zu dreimal); Koordinaten per Screenshot prüfen |
+| `WARNUNG: GUI-Klick auf den Reset-Knopf ohne Wirkung` | egui hat den Klick verschluckt | Fallback greift automatisch; danach `status` prüfen |
+| `Flag-Datei existiert auch nach CLI-Reset noch` | Datei gesperrt oder anderer Pfad | `OMNITRADE_KILL_FILE` prüfen, Datei von Hand löschen, dann `status` |
 | `InsufficientBalance` im Backtest | Standardguthaben zu klein | `--initial-balance 1000000` |
-| Exit 144 bei `pkill`/`pgrep` | Muster trifft die eigene Shell | `pgrep -x <name>` verwenden |
-| `Connection ended` / `ws_closed_mid_exchange` | OKX-WS-Port 8443 gesperrt | erwartet, nicht behebbar im Container |
-| `Konto-Anzeige gibt es nur für Binance` | Kontodaten nur für Binance | erwartet bei `--exchange okx` |
+| `Konto-Anzeige gibt es nur für Binance` | erwartet bei `--exchange okx` | ignorieren |
 
 ## Stand
 
-- Getestet: Build, `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace` (grün), GUI-Start und Screenshot, NOT-AUS setzen/zurücksetzen per Klick, CLI validate und backtest.
-- Nicht getestet: Live-Handel (Testnet-Schlüssel fehlen, Binance gesperrt), Kraken/Binance-Marktdaten, Windows/macOS.
+- Geprüft am 31.10.2026 auf Windows 11 (Host, keine Session-Container): `driver.ps1 build` (Erststart 1m18s, inkrementell 2,8 s), `flow` mit Screenshot und Flag-Prüfung, `status`, `stop`, `cli` (Kerzen-Abruf, zwei `validate`, zwei `backtest`), Standardguthaben-Fehler.
+- Nicht geprüft: Live-Handel mit echten Schlüsseln, Binance, macOS, Linux.
+- Linux-Container: `driver.sh` (Xvfb, xdotool, ImageMagick) stammt aus einem früheren Lauf im Linux-Container und ist auf diesem Host nicht gelaufen. Seine Koordinaten und Gotchas gelten dort, nicht hier.

@@ -253,6 +253,8 @@ pub async fn live_loop(
     // Not-Aus wird bei jeder Kerze und im Sekundentakt geprüft, damit er auch
     // bei ruhigem Markt wirkt.
     let mut kill_check = tokio::time::interval(Duration::from_secs(1));
+    // Long-only wie im Backtest: dieser Lauf hält höchstens eine Long-Position.
+    let mut in_position = false;
 
     // Main event loop: process each candle as it arrives
     loop {
@@ -344,9 +346,12 @@ pub async fn live_loop(
             continue;
         }
 
-        // Determine order side from signal
+        // Determine order side from signal. Verkauf nur bei offener Position, Kauf nur bei flat;
+        // sonst würde der Risk Guard jede Verkaufsorder ohne Position ablehnen.
         let side = match signal {
+            omnitrade_script::Signal::Buy if in_position => continue,
             omnitrade_script::Signal::Buy => Side::Buy,
+            omnitrade_script::Signal::Sell if !in_position => continue,
             omnitrade_script::Signal::Sell => Side::Sell,
             omnitrade_script::Signal::Hold => continue,
         };
@@ -374,6 +379,7 @@ pub async fn live_loop(
             Ok(order) => {
                 info!("Order filled: {:?}", order);
                 let side_name = if side == Side::Buy { "buy" } else { "sell" };
+                in_position = side == Side::Buy;
                 status.record_order(side_name, order_quantity, candle.close, "placed", "");
                 flush_status(status);
             }
