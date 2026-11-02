@@ -5,7 +5,7 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\live-okx-demo.ps1
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
-$Cli = Join-Path $Root 'target\debug\omnitrade-cli.exe'
+$Cli = Join-Path $Root 'target-fix\debug\omnitrade-cli.exe'
 $Logs = Join-Path $Root 'logs'
 $Status = 'status/live_300.json'
 $Out = Join-Path $Logs 'live_okx_demo.out.log'
