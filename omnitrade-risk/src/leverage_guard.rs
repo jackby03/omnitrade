@@ -80,18 +80,16 @@ impl LeverageGuard {
 
     /// Calculates the distance from entry to liquidation price as a fraction.
     ///
-    /// For both long and short positions with leverage L:
-    /// distance = (L - 1) / L
-    ///
-    /// This represents how much the price can move against the position
-    /// before liquidation occurs (as a fraction of entry price).
+    /// For isolated linear positions with leverage L the initial margin is used up
+    /// after an adverse move of roughly 1/L of the entry price:
+    /// distance = 1 / L
     ///
     /// Examples:
-    /// - 10x leverage: (10 - 1) / 10 = 0.9 (90% cushion)
-    /// - 5x leverage: (5 - 1) / 5 = 0.8 (80% cushion)
-    /// - 2x leverage: (2 - 1) / 2 = 0.5 (50% cushion)
+    /// - 10x leverage: 1 / 10 = 0.1 (10% adverse move)
+    /// - 5x leverage: 1 / 5 = 0.2 (20% adverse move)
+    /// - 1x leverage: 1 / 1 = 1.0 (no liquidation within the price range)
     fn calculate_liquidation_distance(&self, leverage: f64) -> f64 {
-        (leverage - 1.0) / leverage
+        1.0 / leverage
     }
 
     /// Validates leverage limits configuration.
@@ -159,7 +157,7 @@ mod tests {
     async fn test_liquidation_distance_sufficient() {
         let guard = LeverageGuard::testnet();
         let order = create_test_order(1, Side::Buy);
-        // With 10x leverage: distance = (10 - 1) / 10 = 0.9 (90%)
+        // With 10x leverage: distance = 1 / 10 = 0.1 (10%)
         // Min requirement: 0.05 (5%)
         let result = guard.check_order(&order, 10.0, 50000.0).await;
         assert!(result.is_ok());
@@ -167,11 +165,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_liquidation_distance_too_close() {
-        let guard = LeverageGuard::new(10.0, 0.50); // 50% min distance
+        let guard = LeverageGuard::new(10.0, 0.20); // 20% min distance
         let order = create_test_order(1, Side::Buy);
-        // With 1.5x leverage: distance = (1.5 - 1) / 1.5 = 0.333... (33%)
-        // Min requirement: 0.50 (50%)
-        let result = guard.check_order(&order, 1.5, 50000.0).await;
+        // With 10x leverage: distance = 1 / 10 = 0.1 (10%)
+        // Min requirement: 0.20 (20%)
+        let result = guard.check_order(&order, 10.0, 50000.0).await;
         assert!(matches!(result, Err(RiskViolation::LiquidationTooClose)));
     }
 
@@ -180,7 +178,7 @@ mod tests {
         let guard = LeverageGuard::testnet();
         // With 10x leverage
         let distance = guard.calculate_liquidation_distance(10.0);
-        assert_eq!(distance, 0.9);
+        assert_eq!(distance, 0.1);
     }
 
     #[test]
@@ -196,7 +194,7 @@ mod tests {
         let guard = LeverageGuard::testnet();
         // With 1.01x leverage (barely above 1x)
         let distance = guard.calculate_liquidation_distance(1.01);
-        assert!((distance - 0.0099).abs() < 0.001);
+        assert!((distance - 0.990_099).abs() < 0.001);
     }
 
     #[test]

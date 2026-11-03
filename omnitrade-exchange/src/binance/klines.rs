@@ -66,7 +66,22 @@ pub async fn fetch_klines(
         ],
     )
     .await?;
-    parse_klines(&body)
+    let mut candles = parse_klines(&body)?;
+    // Die letzte Kerze ist bei einem Start mitten in der Periode noch offen. Sie gehört
+    // nicht in die Historie: die Live-Schleife würde die fertige Kerze sonst verwerfen.
+    let schliesst_spaeter = serde_json::from_str::<Vec<Vec<Value>>>(&body)
+        .ok()
+        .and_then(|zeilen| zeilen.last().and_then(|z| z.get(6)).and_then(Value::as_i64));
+    if let Some(schluss_ms) = schliesst_spaeter {
+        let jetzt = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        if schluss_ms > jetzt {
+            candles.pop();
+        }
+    }
+    Ok(candles)
 }
 
 pub(crate) async fn get_text(url: &str, query: &[(&str, &str)]) -> Result<String, ExchangeError> {

@@ -203,6 +203,15 @@ impl ExchangeTrading for BinanceRestClient {
             ));
         }
 
+        // Stop-, Take-Profit- und Trailing-Orders bekommen hier keinen Auslöser. Als MARKET
+        // geschickt würde eine Schutz-Order sofort ausgeführt, also wie beim OKX-Adapter ablehnen.
+        if !matches!(req.order_type, OrderType::Market | OrderType::Limit) {
+            return Err(ExchangeError::InvalidRequest(format!(
+                "Binance-Adapter unterstützt den Ordertyp {:?} nicht",
+                req.order_type
+            )));
+        }
+
         let mut params = HashMap::new();
         params.insert("symbol".to_string(), req.symbol.clone());
         params.insert(

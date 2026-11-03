@@ -174,6 +174,14 @@ impl LongOnlyGuard {
         Self { start_base: None }
     }
 
+    /// Übernimmt eine bestehende Position als Laufposition (wie [`ExposureLimit::adopt_existing`]).
+    pub(crate) fn adopt_existing(mut self, adopt: bool) -> Self {
+        if adopt {
+            self.start_base = Some(0.0);
+        }
+        self
+    }
+
     /// `held` ist die aktuelle NETTO-Position (`held_base`).
     pub(crate) fn check(&mut self, side: Side, quantity: f64, held: f64) -> Result<(), String> {
         let start = *self.start_base.get_or_insert(held);

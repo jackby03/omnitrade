@@ -213,7 +213,7 @@ pub async fn live_loop(
             .adopt_existing(adopt)
     });
     // Long-only gilt AUCH ohne Deckel: die Bremse haengt nicht an --max-notional.
-    let mut long_only = LongOnlyGuard::new();
+    let mut long_only = LongOnlyGuard::new().adopt_existing(adopt);
     // Zustand der Skript-Auswertung (Trailing-Stop-Hoch etc.) über alle Kerzen.
     let mut script_state = EvaluatorState::new(0.0);
     if allow_shorts {
@@ -635,23 +635,30 @@ pub(crate) async fn place_order_guarded(
         },
     };
 
-    // Check risk guard
-    risk_guard
-        .check_order(&mock_order, &account, current_price)
-        .map_err(|e| {
-            // Der Guard misst das KONTO (alle Spuren auf demselben Konto), nicht das
-            // Kapital dieses Laufs. Bei einer Ablehnung gehoeren Spitze, Basis und
-            // aktuelle Equity ins Log - sonst bleibt die Ursache (Abbuchung, andere
-            // Spur, uPnL) hinterher nicht mehr feststellbar.
-            tracing::warn!(
-                peak_equity = risk_guard.peak_equity(),
-                run_baseline = ?risk_guard.run_baseline(),
-                equity = equity,
-                declared_initial = initial_capital,
-                "RiskGuard lehnt ab: {e}"
-            );
-            LiveLoopError::RiskViolation(e.to_string())
-        })?;
+    // Ein Auftrag, der die Position nur verkleinert, senkt das Risiko. An Verlust- oder
+    // Drawdown-Grenzen zu scheitern würde ein verlierendes Engagement festhalten.
+    let verkleinert = (order_req.side == Side::Sell && held > 0.0
+        || order_req.side == Side::Buy && held < 0.0)
+        && order_req.quantity <= held.abs() * 1.01;
+    if !verkleinert {
+        // Check risk guard
+        risk_guard
+            .check_order(&mock_order, &account, current_price)
+            .map_err(|e| {
+                // Der Guard misst das KONTO (alle Spuren auf demselben Konto), nicht das
+                // Kapital dieses Laufs. Bei einer Ablehnung gehoeren Spitze, Basis und
+                // aktuelle Equity ins Log - sonst bleibt die Ursache (Abbuchung, andere
+                // Spur, uPnL) hinterher nicht mehr feststellbar.
+                tracing::warn!(
+                    peak_equity = risk_guard.peak_equity(),
+                    run_baseline = ?risk_guard.run_baseline(),
+                    equity = equity,
+                    declared_initial = initial_capital,
+                    "RiskGuard lehnt ab: {e}"
+                );
+                LiveLoopError::RiskViolation(e.to_string())
+            })?;
+    }
 
     // Die Abrufe oben können lange dauern. Der Not-Aus, der währenddessen gesetzt wurde,
     // greift hier noch vor der Übermittlung (die Schleife prüft ihn nur im Sekundentakt).
