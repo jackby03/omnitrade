@@ -76,11 +76,12 @@ impl BinanceMarginClient {
 
         let signed_query =
             BinanceSigner::sign_request(&query, &self.credentials.secret, timestamp)?;
-        let url = format!("{}{}", self.base_url, endpoint);
+        // Die signierte Query gehört als ganzes an die URL: timestamp und signature
+        // müssen Top-Level-Parameter sein, nicht in einem Feld verschachtelt.
+        let url = format!("{}{}?{}", self.base_url, endpoint, signed_query);
 
         self.http_client
             .request(method, &url)
-            .query(&[("signature_query", signed_query)])
             .header("X-MBX-APIKEY", &self.credentials.key)
             .send()
             .await

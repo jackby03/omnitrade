@@ -97,6 +97,7 @@ async fn perpetual_drawdown_ignores_foreign_account_movements() {
             Some("USDT"),
             None,
             None,
+            Path::new(""),
         )
         .await;
         assert!(res.is_ok(), "Konto {konto}: {res:?}");
@@ -114,11 +115,11 @@ async fn perpetual_drawdown_still_blocks_own_unrealized_loss() {
     let req = OrderRequest::market("BTCUSDT".into(), Side::Buy, 0.0001);
     let trading = trading_with(200.0, 0.0);
     *trading.pos_upl.lock().expect("upl") = (vec![4.0, -3.0], 0);
-    place_order_guarded(&trading, &mut guard, &req, 50_000.0, 50.0, Some("USDT"), None, None)
+    place_order_guarded(&trading, &mut guard, &req, 50_000.0, 50.0, Some("USDT"), None, None, Path::new(""))
         .await
         .expect("erste Order");
     let res =
-        place_order_guarded(&trading, &mut guard, &req, 50_000.0, 50.0, Some("USDT"), None, None)
+        place_order_guarded(&trading, &mut guard, &req, 50_000.0, 50.0, Some("USDT"), None, None, Path::new(""))
             .await;
     assert!(matches!(res, Err(LiveLoopError::RiskViolation(_))), "{res:?}");
 }

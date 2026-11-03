@@ -318,10 +318,19 @@ impl ExchangeTrading for OkxRestClient {
         let data = self
             .call(Method::GET, "/api/v5/trade/orders-pending", None)
             .await?;
-        data.iter()
+        // Eine fremde Order (anderes Instrument, ohne geladene Regeln) darf den Abruf
+        // nicht zu Fall bringen: sonst bleibt auch der Not-Aus bei eigenen Orders stecken.
+        Ok(data
+            .iter()
             .filter_map(parse_order)
-            .map(|o| self.to_base_units(o))
-            .collect()
+            .filter_map(|o| match self.to_base_units(o) {
+                Ok(order) => Some(order),
+                Err(e) => {
+                    tracing::warn!("Offene Order übersprungen (Umrechnung fehlgeschlagen): {e}");
+                    None
+                }
+            })
+            .collect())
     }
 
     async fn get_balance(&self) -> Result<Account, ExchangeError> {

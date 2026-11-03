@@ -7,7 +7,7 @@
 use omnitrade_core::{Candle, OrderStatus, Side, TimeInForce};
 use omnitrade_exchange::{ExchangeStream, ExchangeTrading, Network, OrderRequest};
 use omnitrade_risk::guard::RiskGuard;
-use omnitrade_script::compile_and_run;
+use omnitrade_script::{compile_and_run_extended, EvaluatorState};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -214,6 +214,8 @@ pub async fn live_loop(
     });
     // Long-only gilt AUCH ohne Deckel: die Bremse haengt nicht an --max-notional.
     let mut long_only = LongOnlyGuard::new();
+    // Zustand der Skript-Auswertung (Trailing-Stop-Hoch etc.) über alle Kerzen.
+    let mut script_state = EvaluatorState::new(0.0);
     if allow_shorts {
         warn!(
             "Shorts aktiviert: Sell-Signale dürfen Kurzpositionen eröffnen \
@@ -342,8 +344,8 @@ pub async fn live_loop(
         trace!("Evaluating candle: {:?}", candle);
 
         // Evaluate strategy script against accumulated candles
-        let signal = match compile_and_run(&script_content, &candle_buffer) {
-            Ok(sig) => sig,
+        let intent = match compile_and_run_extended(&script_content, &candle_buffer, &mut script_state) {
+            Ok(intent) => intent,
             Err(e) => {
                 warn!("Script evaluation error for {}: {}", symbol, e);
                 status.record_candle(&candle, "hold");
@@ -351,11 +353,23 @@ pub async fn live_loop(
                 continue;
             }
         };
+        let signal = intent.signal;
         status.record_candle(&candle, signal_name(signal));
         flush_status(status);
 
         // Skip if no signal
         if signal == omnitrade_script::Signal::Hold {
+            continue;
+        }
+        // Stop-Loss, Take-Profit und Trailing-Stop werden im Live-Modus nicht ausgeführt.
+        // Statt sie stillschweigend zu verwerfen, wird der Auftrag explizit abgelehnt.
+        if intent.stop_loss.is_some()
+            || intent.take_profit.is_some()
+            || intent.trailing_pct.is_some()
+        {
+            warn!(
+                "Risiko-Direktive (stop_loss/take_profit/trailing_stop) im Live-Modus nicht unterstützt - Auftrag abgelehnt"
+            );
             continue;
         }
 
@@ -384,6 +398,7 @@ pub async fn live_loop(
             } else {
                 Some(&mut long_only)
             },
+            kill_file,
         )
         .await
         {
@@ -491,6 +506,7 @@ pub(crate) async fn place_order_with_risk_check(
         None,
         None,
         None,
+        Path::new(""),
     )
     .await
 }
@@ -511,6 +527,7 @@ pub(crate) async fn place_order_guarded(
     settle_currency: Option<&str>,
     exposure: Option<&mut ExposureLimit>,
     long_only: Option<&mut LongOnlyGuard>,
+    kill_file: &Path,
 ) -> Result<omnitrade_core::Order, LiveLoopError> {
     // Create mock order for risk checking
     let mock_order = omnitrade_core::Order {
@@ -635,6 +652,14 @@ pub(crate) async fn place_order_guarded(
             );
             LiveLoopError::RiskViolation(e.to_string())
         })?;
+
+    // Die Abrufe oben können lange dauern. Der Not-Aus, der währenddessen gesetzt wurde,
+    // greift hier noch vor der Übermittlung (die Schleife prüft ihn nur im Sekundentakt).
+    if kill_switch::is_engaged(kill_file) {
+        return Err(LiveLoopError::RiskViolation(
+            "Not-Aus gesetzt - Auftrag nicht übermittelt".to_string(),
+        ));
+    }
 
     // Risk check passed; submit order to exchange
     exchange_trading

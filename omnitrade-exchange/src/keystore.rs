@@ -122,10 +122,13 @@ mod tests {
         assert_eq!(key, "omnitrade/kraken/mainnet");
     }
 
+    // Schreibt in den echten Schlüsselbund-Eintrag `omnitrade/binance/testnet` und
+    // löscht ihn danach: gehört ein Schlüssel dort einem Entwickler, geht er verloren.
+    // Darum nur ausdrücklich laufen lassen (`cargo test -- --ignored`).
+    #[ignore = "schreibt in den echten Schlüsselbund-Eintrag"]
     #[test]
     fn test_credentials_roundtrip() {
         // This test requires keyring access and is marked as integration test
-        // In CI, it should be ignored with #[ignore]
         let creds = ApiCredentials::new(
             "test_key_123".to_string(),
             "test_secret_456".to_string(),
@@ -150,6 +153,7 @@ mod tests {
         }
     }
 
+    #[ignore = "schreibt in den echten Schlüsselbund-Eintrag"]
     #[test]
     fn test_network_mismatch_protection() {
         let creds = ApiCredentials::new("key".to_string(), "secret".to_string(), Network::Testnet);
