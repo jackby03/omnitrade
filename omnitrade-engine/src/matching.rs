@@ -262,7 +262,8 @@ impl MatchingEngine {
                 };
                 if hit {
                     let fill_price = limit_price.unwrap_or(*trigger_price);
-                    (true, fill_price, true, FillType::StopLoss)
+                    // Ohne Limit wird der Stop als Markt-Order ausgeführt: Taker-Gebühr.
+                    (true, fill_price, limit_price.is_some(), FillType::StopLoss)
                 } else {
                     (false, 0.0, false, FillType::Regular)
                 }
@@ -278,7 +279,7 @@ impl MatchingEngine {
                 };
                 if hit {
                     let fill_price = limit_price.unwrap_or(*trigger_price);
-                    (true, fill_price, true, FillType::TakeProfit)
+                    (true, fill_price, limit_price.is_some(), FillType::TakeProfit)
                 } else {
                     (false, 0.0, false, FillType::Regular)
                 }
@@ -294,7 +295,7 @@ impl MatchingEngine {
                         order.trailing_highest_price = Some(extreme);
                         let threshold = extreme * (1.0 - percent);
                         if candle.low <= threshold {
-                            (true, threshold, true, FillType::TrailingStop)
+                            (true, threshold, false, FillType::TrailingStop)
                         } else {
                             (false, 0.0, false, FillType::Regular)
                         }
@@ -306,7 +307,7 @@ impl MatchingEngine {
                         order.trailing_highest_price = Some(extreme);
                         let threshold = extreme * (1.0 + percent);
                         if candle.high >= threshold {
-                            (true, threshold, true, FillType::TrailingStop)
+                            (true, threshold, false, FillType::TrailingStop)
                         } else {
                             (false, 0.0, false, FillType::Regular)
                         }

@@ -126,7 +126,15 @@ impl KrakenRouter {
                 .map(|l| Some((l.get("price")?.as_f64()?, l.get("qty")?.as_f64()?)))
                 .collect()
         };
-        let (Some(bids), Some(asks)) = (side("bids"), side("asks")) else {
+        // Kraken v2 schickt bei einseitigen Änderungen nur `bids` oder nur `asks`. Eine
+        // fehlende Seite ist dann ein leeres Delta; eine vorhandene, aber kaputte Seite nicht.
+        let seite = |key: &str| -> Option<Vec<(f64, f64)>> {
+            match item.get(key) {
+                None => Some(Vec::new()),
+                Some(_) => side(key),
+            }
+        };
+        let (Some(bids), Some(asks)) = (seite("bids"), seite("asks")) else {
             warn!(symbol, "Unparseable Kraken book entry");
             return;
         };

@@ -19,7 +19,7 @@ use omnitrade_script::GridConfig;
 use tracing::{info, warn};
 
 use crate::kill_switch;
-use crate::live_loop::{cancel_open_orders, place_order_with_risk_check, LiveLoopError};
+use crate::live_loop::{cancel_open_orders, place_order_with_kill, LiveLoopError};
 
 /// Laufzeit-Parameter eines Grid-Laufs.
 #[derive(Debug, Clone)]
@@ -88,6 +88,10 @@ pub async fn grid_loop(
     let mut levels: HashMap<u64, Level> = HashMap::new();
 
     for (price, qty) in grid.generate_buy_orders() {
+        if kill_switch::is_engaged(kill_file) {
+            cancel_open_orders(&exchange_trading, symbol).await;
+            return Ok(());
+        }
         let level = Level {
             side: Side::Buy,
             price: round_price(price, price_decimals),
@@ -100,6 +104,7 @@ pub async fn grid_loop(
             initial_capital,
             level,
             &mut levels,
+            kill_file,
         )
         .await;
     }
@@ -162,6 +167,7 @@ pub async fn grid_loop(
                         initial_capital,
                         counter,
                         &mut levels,
+                        kill_file,
                     )
                     .await;
                 }
@@ -213,18 +219,20 @@ async fn place_level(
     initial_capital: f64,
     level: Level,
     levels: &mut HashMap<u64, Level>,
+    kill_file: &Path,
 ) {
     if level.qty <= 0.0 || level.price <= 0.0 {
         warn!("Stufe verworfen (Preis/Menge nach Rundung 0): {:?}", level);
         return;
     }
     let req = OrderRequest::limit(symbol.to_string(), level.side, level.qty, level.price);
-    match place_order_with_risk_check(
+    match place_order_with_kill(
         exchange_trading,
         risk_guard,
         &req,
         level.price,
         initial_capital,
+        kill_file,
     )
     .await
     {

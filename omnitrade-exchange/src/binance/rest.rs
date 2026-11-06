@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const RECV_WINDOW_MS: u64 = 5000;
 
 /// Binance liefert Zahlen als JSON-Strings ("0.00100000"); akzeptiert beides.
-fn de_f64<'de, D>(d: D) -> Result<f64, D::Error>
+pub(crate) fn de_f64<'de, D>(d: D) -> Result<f64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

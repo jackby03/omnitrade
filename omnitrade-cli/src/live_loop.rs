@@ -497,6 +497,27 @@ pub(crate) async fn place_order_with_risk_check(
     current_price: f64,
     initial_capital: f64,
 ) -> Result<omnitrade_core::Order, LiveLoopError> {
+    place_order_with_kill(
+        exchange_trading,
+        risk_guard,
+        order_req,
+        current_price,
+        initial_capital,
+        Path::new(""),
+    )
+    .await
+}
+
+/// Wie [`place_order_with_risk_check`], prüft aber den übergebenen Not-Aus unmittelbar vor
+/// der Übermittlung. Der Grid-Lauf nutzt das, damit eine Leiter den Not-Aus nicht überholt.
+pub(crate) async fn place_order_with_kill(
+    exchange_trading: &impl ExchangeTrading,
+    risk_guard: &mut RiskGuard,
+    order_req: &OrderRequest,
+    current_price: f64,
+    initial_capital: f64,
+    kill_file: &Path,
+) -> Result<omnitrade_core::Order, LiveLoopError> {
     place_order_guarded(
         exchange_trading,
         risk_guard,
@@ -506,7 +527,7 @@ pub(crate) async fn place_order_with_risk_check(
         None,
         None,
         None,
-        Path::new(""),
+        kill_file,
     )
     .await
 }

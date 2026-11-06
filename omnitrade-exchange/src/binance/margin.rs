@@ -267,8 +267,11 @@ struct BinanceOrderResponse {
     symbol: String,
     order_id: i64,
     client_order_id: String,
+    #[serde(deserialize_with = "super::rest::de_f64")]
     price: f64,
+    #[serde(deserialize_with = "super::rest::de_f64")]
     orig_qty: f64,
+    #[serde(deserialize_with = "super::rest::de_f64")]
     executed_qty: f64,
     status: String,
     time_in_force: String,
@@ -277,8 +280,23 @@ struct BinanceOrderResponse {
     side: String,
     time: i64,
     update_time: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_opt_f64")]
     stop_price: Option<f64>,
+}
+
+/// Binance liefert Preise und Mengen als JSON-Strings, manchmal als Zahl; leer oder fehlend heißt `None`.
+fn de_opt_f64<'de, D>(d: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    match Option::<serde_json::Value>::deserialize(d)? {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => Ok(n.as_f64()),
+        Some(serde_json::Value::String(s)) if s.is_empty() => Ok(None),
+        Some(serde_json::Value::String(s)) => s.parse().map(Some).map_err(D::Error::custom),
+        Some(other) => Err(D::Error::custom(format!("unerwarteter Wert: {other}"))),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -290,6 +308,24 @@ struct BinanceMarginAccountResponse {
 #[derive(Debug, Serialize, Deserialize)]
 struct BinanceAsset {
     asset: String,
+    #[serde(deserialize_with = "super::rest::de_f64")]
     wallet_balance: f64,
+    #[serde(deserialize_with = "super::rest::de_f64")]
     unrealized_profit: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn order_response_accepts_string_numbers() {
+        let json = r#"{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"c","price":"0.00000",
+            "origQty":"0.001","executedQty":"0.001","status":"FILLED","timeInForce":"GTC",
+            "type":"MARKET","side":"BUY","time":1,"updateTime":2,"stopPrice":""}"#;
+        let r: BinanceOrderResponse = serde_json::from_str(json).expect("Binance-Strings");
+        assert_eq!(r.orig_qty, 0.001);
+        assert_eq!(r.executed_qty, 0.001);
+        assert_eq!(r.stop_price, None);
+    }
 }
