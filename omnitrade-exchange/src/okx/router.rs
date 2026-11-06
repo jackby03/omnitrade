@@ -57,6 +57,9 @@ impl OkxRouter {
                 return Ok(());
             }
         };
+        // OKX markiert das vollständige Buch (nach Abo und nach jedem Wiederverbinden) mit
+        // `action: snapshot`, Änderungen mit `update`.
+        let book_snapshot = value.get("action").and_then(Value::as_str) == Some("snapshot");
         if value.get("event").and_then(Value::as_str) == Some("error") {
             warn!(message = raw, "OKX rejected a request");
             return Ok(());
@@ -80,7 +83,7 @@ impl OkxRouter {
             }
         } else if channel == "books" || channel == "books5" {
             for item in data {
-                self.handle_book(&key, item);
+                self.handle_book(&key, item, book_snapshot);
             }
         }
         Ok(())
@@ -110,7 +113,7 @@ impl OkxRouter {
         }
     }
 
-    fn handle_book(&mut self, key: &str, item: &Value) {
+    fn handle_book(&mut self, key: &str, item: &Value, snapshot: bool) {
         let side = |name: &str| -> Option<Vec<(f64, f64)>> {
             item.get(name)?
                 .as_array()?
@@ -133,7 +136,12 @@ impl OkxRouter {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
         if let Some(sender) = self.depth_senders.get(key) {
-            if let Err(err) = sender.try_send(DepthUpdate::new(ts, bids, asks)) {
+            let update = if snapshot {
+                DepthUpdate::snapshot(ts, bids, asks)
+            } else {
+                DepthUpdate::new(ts, bids, asks)
+            };
+            if let Err(err) = sender.try_send(update) {
                 warn!(symbol = key, error = %err, "Failed to route depth message");
             }
         }

@@ -91,14 +91,15 @@ pub fn apply(state: &mut UIState, doc: StatusDoc) {
         .map(|c| Candle::new(c.time_ms, c.open, c.high, c.low, c.close, c.volume))
         .collect();
     state.set_candles(&doc.symbol, candles);
-    state.set_connected(matches!(doc.state.as_str(), "starting" | "running"));
+    // Die Statusdatei meldet den Lauf, nicht die Boersenverbindung. Die Verbindung
+    // setzt allein der Marktdaten-Feed, sonst zeigt die GUI bei fehlender Datei
+    // dauerhaft "getrennt", obwohl der Kurs-Stream läuft.
     state.feed_error = None;
     state.status = Some(doc);
 }
 
 /// Marks the feed as broken (missing or bad file).
 pub fn apply_error(state: &mut UIState, message: String) {
-    state.set_connected(false);
     state.feed_error = Some(message);
 }
 
@@ -188,7 +189,8 @@ mod tests {
     fn test_apply_fills_state() {
         let mut state = UIState::new();
         apply(&mut state, doc());
-        assert!(state.connected);
+        // Verbindungsstatus bleibt beim Marktdaten-Feed, die Statusdatei setzt ihn nicht.
+        assert!(!state.connected);
         assert_eq!(state.latest_candles("BTCUSDC", 10).len(), 1);
         assert_eq!(state.latest_candles("BTCUSDC", 10)[0].close, 1.5);
         assert_eq!(state.status.as_ref().unwrap().exchange, "okx");

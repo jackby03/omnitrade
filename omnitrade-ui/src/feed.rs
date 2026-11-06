@@ -85,7 +85,12 @@ async fn run_session(
             },
             update = depth.recv() => match update {
                 Some(u) => with_state(state, |s| {
-                    if let Err(e) = s.apply_depth(symbol, u.timestamp_ms, &u.bids, &u.asks) {
+                    let result = if u.snapshot {
+                        s.replace_depth(symbol, u.timestamp_ms, &u.bids, &u.asks)
+                    } else {
+                        s.apply_depth(symbol, u.timestamp_ms, &u.bids, &u.asks)
+                    };
+                    if let Err(e) = result {
                         s.push_log(format!("Ungültiges Depth-Update verworfen: {e}"));
                     }
                 }),

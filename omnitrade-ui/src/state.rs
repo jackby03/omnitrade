@@ -97,6 +97,22 @@ impl UIState {
         Ok(())
     }
 
+    /// Ersetzt das Buch eines Symbols durch einen vollständigen Stand (Snapshot mit Zeitstempel).
+    /// Stufen, die im Snapshot fehlen, sind danach weg.
+    pub fn replace_depth(
+        &mut self,
+        symbol: &str,
+        timestamp_ms: u64,
+        bids: &[(f64, f64)],
+        asks: &[(f64, f64)],
+    ) -> Result<(), omnitrade_engine::EngineError> {
+        let mut book = L2OrderBook::new(symbol);
+        book.apply_delta(bids, asks)?;
+        book.set_last_update_ms(timestamp_ms);
+        self.orderbook.insert(symbol.to_string(), book);
+        Ok(())
+    }
+
     /// Replaces the order book of a symbol with a full snapshot.
     pub fn set_orderbook_snapshot(
         &mut self,

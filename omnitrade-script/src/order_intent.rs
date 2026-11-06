@@ -3,6 +3,8 @@
 //! Defines order-level directives (Take-Profit, Stop-Loss, Trailing-Stop)
 //! alongside base signal, with persistent state across candles.
 
+use std::collections::HashMap;
+
 use crate::ast::Signal;
 
 /// Represents complete trading intent with signal and risk management parameters.
@@ -68,6 +70,8 @@ pub struct EvaluatorState {
     pub highest_price_seen: f64,
     /// Reference price for current trailing stop (calculated from highest).
     pub trailing_stop_ref: Option<f64>,
+    /// Variable bindings after the last evaluated candle (read back by `prev()`).
+    pub variables: HashMap<String, f64>,
 }
 
 impl EvaluatorState {
@@ -76,6 +80,7 @@ impl EvaluatorState {
         Self {
             highest_price_seen: initial_price,
             trailing_stop_ref: None,
+            variables: HashMap::new(),
         }
     }
 

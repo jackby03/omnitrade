@@ -15,15 +15,27 @@ pub struct DepthUpdate {
     pub bids: Vec<(f64, f64)>,
     /// Vector of ask price levels: `(price, quantity)`.
     pub asks: Vec<(f64, f64)>,
+    /// `true`, wenn die Nachricht das vollständige Buch ist (Snapshot, z. B. nach einem
+    /// Wiederverbinden). Ein Snapshot ersetzt den Bestand, ein Delta wird eingearbeitet.
+    pub snapshot: bool,
 }
 
 impl DepthUpdate {
-    /// Creates a new `DepthUpdate` instance.
+    /// Creates a new delta `DepthUpdate` instance.
     pub fn new(timestamp_ms: u64, bids: Vec<(f64, f64)>, asks: Vec<(f64, f64)>) -> Self {
         Self {
             timestamp_ms,
             bids,
             asks,
+            snapshot: false,
+        }
+    }
+
+    /// Creates a full-book snapshot that replaces the previous book.
+    pub fn snapshot(timestamp_ms: u64, bids: Vec<(f64, f64)>, asks: Vec<(f64, f64)>) -> Self {
+        Self {
+            snapshot: true,
+            ..Self::new(timestamp_ms, bids, asks)
         }
     }
 }

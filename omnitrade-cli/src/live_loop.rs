@@ -5,7 +5,9 @@
 //! and places orders via the exchange trading interface.
 
 use omnitrade_core::{Candle, OrderStatus, Side, TimeInForce};
-use omnitrade_exchange::{ExchangeStream, ExchangeTrading, Network, OrderRequest};
+use omnitrade_exchange::{
+    ExchangeStream, ExchangeTrading, Network, OrderRequest, PositionSnapshot,
+};
 use omnitrade_risk::guard::RiskGuard;
 use omnitrade_script::{compile_and_run_extended, EvaluatorState};
 use std::fs;
@@ -21,13 +23,17 @@ mod risk;
 #[cfg(test)]
 mod risk_tests;
 #[cfg(test)]
+mod risk_tests_lang;
+#[cfg(test)]
+mod risk_tests_mainnet;
+#[cfg(test)]
 mod test_support;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use risk::{
-    account_equity, bewertungs_waehrung, check_liquidation_distance, held_base, split_symbol,
-    valid_mainnet_cap, ExposureLimit, LongOnlyGuard,
+    account_equity, bewertungs_waehrung, check_liquidation_distance, held_base,
+    realisiert_beim_schliessen, split_symbol, valid_mainnet_cap, ExposureLimit, LongOnlyGuard,
 };
 
 /// Maximale Anzahl Kerzen, die für die Skript-Auswertung vorgehalten werden.
@@ -216,6 +222,11 @@ pub async fn live_loop(
     let mut long_only = LongOnlyGuard::new().adopt_existing(adopt);
     // Zustand der Skript-Auswertung (Trailing-Stop-Hoch etc.) über alle Kerzen.
     let mut script_state = EvaluatorState::new(0.0);
+    // Spot: Bestand der Basiswaehrung vor dem ersten Auftrag dieses Laufs.
+    let mut spot_start: Option<f64> = None;
+    // Perpetual: realisierter PnL des Laufs und der Positionsstand der letzten Kerze.
+    let mut run_realized = 0.0_f64;
+    let mut perp_zuvor: Option<PositionSnapshot> = None;
     if allow_shorts {
         warn!(
             "Shorts aktiviert: Sell-Signale dürfen Kurzpositionen eröffnen \
@@ -330,29 +341,48 @@ pub async fn live_loop(
         // wird geloggt - nie stillschweigend auf 0 gesetzt.
         // Die signierte Boersenposition entscheidet ueber die Richtung des Auftrags.
         // Scheitert der Abruf, bleibt das Buch stehen und dieser Lauf ordert nichts.
-        let net_position = match exchange_trading.position_snapshot(symbol).await {
-            Ok(snapshot) => {
+        // Spot-Snapshots kennen keinen Bestand (Standard: 0). Dort zaehlt der Laufbestand
+        // aus dem Kontostand, abzueglich des Vorbestands.
+        let (net_position, is_spot) = match exchange_trading.position_snapshot(symbol).await {
+            Ok(snapshot) if snapshot.is_perpetual => {
+                if let Some(vorher) = perp_zuvor.as_ref() {
+                    run_realized += realisiert_beim_schliessen(vorher, &snapshot);
+                }
+                perp_zuvor = Some(snapshot);
                 status.set_net_quantity(snapshot.base_qty);
-                Some(snapshot.base_qty)
+                (Some(snapshot.base_qty), false)
+            }
+            Ok(_) => {
+                match spot_run_net(&exchange_trading, symbol, adopt, &mut spot_start).await {
+                    Ok(net) => {
+                        status.set_net_quantity(net);
+                        (Some(net), true)
+                    }
+                    Err(err) => {
+                        warn!("Spot-Bestand nicht abrufbar ({err}) - Buch bleibt auf dem letzten Stand");
+                        (None, true)
+                    }
+                }
             }
             Err(err) => {
                 warn!("Position nicht abrufbar ({err}) - Buch bleibt auf dem letzten Stand");
-                None
+                (None, false)
             }
         };
 
         trace!("Evaluating candle: {:?}", candle);
 
         // Evaluate strategy script against accumulated candles
-        let intent = match compile_and_run_extended(&script_content, &candle_buffer, &mut script_state) {
-            Ok(intent) => intent,
-            Err(e) => {
-                warn!("Script evaluation error for {}: {}", symbol, e);
-                status.record_candle(&candle, "hold");
-                flush_status(status);
-                continue;
-            }
-        };
+        let intent =
+            match compile_and_run_extended(&script_content, &candle_buffer, &mut script_state) {
+                Ok(intent) => intent,
+                Err(e) => {
+                    warn!("Script evaluation error for {}: {}", symbol, e);
+                    status.record_candle(&candle, "hold");
+                    flush_status(status);
+                    continue;
+                }
+            };
         let signal = intent.signal;
         status.record_candle(&candle, signal_name(signal));
         flush_status(status);
@@ -380,8 +410,15 @@ pub async fn live_loop(
         let Some(side) = order_side(signal, net, allow_shorts) else {
             continue;
         };
+        // Spot: ein Verkauf geht nie ueber den Laufbestand hinaus. Die Kauf-Gebuehr wird in
+        // der Basiswaehrung abgezogen; Vorbestand bleibt unangetastet.
+        let qty = if is_spot && side == Side::Sell && net > 0.0 {
+            order_quantity.min(net)
+        } else {
+            order_quantity
+        };
 
-        let order_req = OrderRequest::market(symbol.to_string(), side, order_quantity);
+        let order_req = OrderRequest::market(symbol.to_string(), side, qty);
         info!("Placing order: {:?}", order_req);
 
         // Place order and check risk guard
@@ -391,6 +428,7 @@ pub async fn live_loop(
             &order_req,
             candle.close,
             initial_capital,
+            run_realized,
             settle_currency,
             exposure.as_mut(),
             if allow_shorts {
@@ -405,19 +443,13 @@ pub async fn live_loop(
             Ok(order) => {
                 info!("Order filled: {:?}", order);
                 let side_name = if side == Side::Buy { "buy" } else { "sell" };
-                status.record_order(side_name, order_quantity, candle.close, "placed", "");
+                status.record_order(side_name, qty, candle.close, "placed", "");
                 flush_status(status);
             }
             Err(e) => {
                 warn!("Order rejected by RiskGuard: {}", e);
                 let side_name = if side == Side::Buy { "buy" } else { "sell" };
-                status.record_order(
-                    side_name,
-                    order_quantity,
-                    candle.close,
-                    "rejected",
-                    &e.to_string(),
-                );
+                status.record_order(side_name, qty, candle.close, "rejected", &e.to_string());
                 flush_status(status);
                 // Continue loop; do not halt on single order failure
             }
@@ -433,265 +465,12 @@ pub async fn live_loop(
     Ok(())
 }
 
-/// Richtung des Auftrags aus Signal und signierter Boersenposition (`net`: > 0 long,
-/// < 0 short, 0 flat). Wie im Backtest: kein Nachkauf, ein Gegensignal schliesst die
-/// offene Position, ein Verkauf bei flat eroeffnet nur mit erlaubten Shorts.
-pub(crate) fn order_side(
-    signal: omnitrade_script::Signal,
-    net: f64,
-    allow_shorts: bool,
-) -> Option<Side> {
-    match signal {
-        omnitrade_script::Signal::Buy if net > 0.0 => None,
-        omnitrade_script::Signal::Buy => Some(Side::Buy),
-        omnitrade_script::Signal::Sell if net < 0.0 => None,
-        omnitrade_script::Signal::Sell if net == 0.0 && !allow_shorts => None,
-        omnitrade_script::Signal::Sell => Some(Side::Sell),
-        omnitrade_script::Signal::Hold => None,
-    }
-}
-
-/// Storniert alle offenen Orders des Symbols. Fremde Symbole bleiben unberührt.
-///
-/// Einzelne Fehler werden geloggt und brechen den Vorgang nicht ab.
-pub(crate) async fn cancel_open_orders(exchange_trading: &impl ExchangeTrading, symbol: &str) {
-    error!("Not-Aus ausgelöst: keine neuen Orders, storniere offene Orders");
-    match exchange_trading.get_open_orders().await {
-        Ok(orders) => {
-            for order in orders.into_iter().filter(|o| o.symbol == symbol) {
-                if let Err(e) = exchange_trading
-                    .cancel_order(&order.id.to_string(), &order.symbol)
-                    .await
-                {
-                    warn!("Stornierung von Order {} fehlgeschlagen: {}", order.id, e);
-                }
-            }
-        }
-        Err(e) => warn!("Offene Orders nicht abrufbar: {}", e),
-    }
-}
-
 /// Not-Aus: storniert offene Orders des Symbols und trennt die Verbindung.
 ///
 /// Bestände werden bewusst nicht verkauft.
-async fn halt_trading(
-    exchange_trading: &impl ExchangeTrading,
-    symbol: &str,
-    exchange_stream: &mut impl ExchangeStream,
-) -> Result<(), LiveLoopError> {
-    cancel_open_orders(exchange_trading, symbol).await;
-    exchange_stream
-        .disconnect()
-        .await
-        .map_err(|e| LiveLoopError::ExchangeError(e.to_string()))
-}
-
-/// Helper: Place order after passing risk guard checks.
-///
-/// Creates a mock Order from the request, checks it against RiskGuard,
-/// and if approved, submits to the exchange.
-pub(crate) async fn place_order_with_risk_check(
-    exchange_trading: &impl ExchangeTrading,
-    risk_guard: &mut RiskGuard,
-    order_req: &OrderRequest,
-    current_price: f64,
-    initial_capital: f64,
-) -> Result<omnitrade_core::Order, LiveLoopError> {
-    place_order_with_kill(
-        exchange_trading,
-        risk_guard,
-        order_req,
-        current_price,
-        initial_capital,
-        Path::new(""),
-    )
-    .await
-}
-
-/// Wie [`place_order_with_risk_check`], prüft aber den übergebenen Not-Aus unmittelbar vor
-/// der Übermittlung. Der Grid-Lauf nutzt das, damit eine Leiter den Not-Aus nicht überholt.
-pub(crate) async fn place_order_with_kill(
-    exchange_trading: &impl ExchangeTrading,
-    risk_guard: &mut RiskGuard,
-    order_req: &OrderRequest,
-    current_price: f64,
-    initial_capital: f64,
-    kill_file: &Path,
-) -> Result<omnitrade_core::Order, LiveLoopError> {
-    place_order_guarded(
-        exchange_trading,
-        risk_guard,
-        order_req,
-        current_price,
-        initial_capital,
-        None,
-        None,
-        None,
-        kill_file,
-    )
-    .await
-}
-
-/// Wie [`place_order_with_risk_check`], zusätzlich mit optionalem Positionsdeckel.
-///
-/// Acht Parameter, weil der Risikopfad alles braucht, was die Schleife ohnehin
-/// hält (Konto, Deckel, Long-only, Startkapital, Abrechnungswaehrung). Ein
-/// Struktur-Umbau waere hier Umbau ohne Gewinn - die Funktion hat zwei Aufrufer.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn place_order_guarded(
-    exchange_trading: &impl ExchangeTrading,
-    risk_guard: &mut RiskGuard,
-    order_req: &OrderRequest,
-    current_price: f64,
-    initial_capital: f64,
-    // Abrechnungswaehrung des Instruments; `None` = Quote des Symbols.
-    settle_currency: Option<&str>,
-    exposure: Option<&mut ExposureLimit>,
-    long_only: Option<&mut LongOnlyGuard>,
-    kill_file: &Path,
-) -> Result<omnitrade_core::Order, LiveLoopError> {
-    // Create mock order for risk checking
-    let mock_order = omnitrade_core::Order {
-        id: 0,
-        symbol: order_req.symbol.clone(),
-        side: order_req.side,
-        order_type: order_req.order_type.clone(),
-        time_in_force: TimeInForce::GTC,
-        price: order_req.price.unwrap_or(current_price),
-        stop_price: 0.0,
-        quantity: order_req.quantity,
-        filled_quantity: 0.0,
-        status: OrderStatus::New,
-        created_at_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64,
-        updated_at_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64,
-        trailing_highest_price: None,
-    };
-
-    // Minimal AccountInfo implementation for risk checking
-    struct SimpleAccount {
-        initial: f64,
-        current: f64,
-        pnl: f64,
-        /// Equity des LAUF-Kapitals: deklariertes Startkapital + uPnL der eigenen
-        /// Position. Das Konto ist geteilt und taugt nicht als Drawdown-Basis.
-        run_equity: f64,
-    }
-
-    impl omnitrade_risk::guard::AccountInfo for SimpleAccount {
-        fn total_equity(&self) -> f64 {
-            self.current
-        }
-
-        fn total_pnl(&self) -> f64 {
-            self.pnl
-        }
-
-        fn initial_balance(&self) -> f64 {
-            self.initial
-        }
-
-        fn drawdown_equity(&self) -> f64 {
-            self.run_equity
-        }
-    }
-
-    // Echter Kontostand statt fester Startsumme, sonst bleiben Drawdown- und
-    // Tagesverlust-Limits wirkungslos. Schlägt der Abruf fehl oder lässt sich das
-    // Symbol nicht zerlegen, wird die Order abgelehnt (fail closed).
-    if !current_price.is_finite() || current_price <= 0.0 {
-        return Err(LiveLoopError::RiskViolation(format!(
-            "ungültiger Preis {current_price} für die Eigenkapital-Bewertung"
-        )));
-    }
-    let (base, quote) = split_symbol(&order_req.symbol).ok_or_else(|| {
-        LiveLoopError::ExchangeError(format!(
-            "Symbol {} lässt sich nicht in Basis/Quote zerlegen",
-            order_req.symbol
-        ))
-    })?;
-    let balances = exchange_trading
-        .get_balance()
-        .await
-        .map_err(|e| LiveLoopError::ExchangeError(format!("Kontostand: {e}")))?;
-    let position = exchange_trading
-        .position_snapshot(&order_req.symbol)
-        .await
-        .map_err(|e| LiveLoopError::ExchangeError(format!("Position: {e}")))?;
-    check_liquidation_distance(&position, order_req.side).map_err(LiveLoopError::RiskViolation)?;
-    // Bewertungswaehrung: bei XPERP traegt das Konto USDC, das Symbol sagt "USD".
-    // Ohne diese Aufloesung findet pair_equity keinen Bestand, die Equity faellt
-    // auf den uPnL zusammen und der Drawdown schiesst ins Millionenprozent.
-    let waehrung = bewertungs_waehrung(&balances, &quote, settle_currency);
-    let equity = account_equity(&balances, &base, waehrung, current_price, &position);
-
-    let held = held_base(&balances, &base, &position);
-    // Long-only zuerst: sie gilt unabhaengig davon, ob ein Deckel gesetzt ist.
-    if let Some(guard) = long_only {
-        guard
-            .check(order_req.side, order_req.quantity, held)
-            .map_err(LiveLoopError::RiskViolation)?;
-    }
-    if let Some(limit) = exposure {
-        limit
-            .check(order_req.side, order_req.quantity, current_price, held)
-            .map_err(LiveLoopError::RiskViolation)?;
-    }
-    let account = SimpleAccount {
-        initial: initial_capital,
-        current: equity,
-        pnl: equity - initial_capital,
-        // Perpetuals (mit Abrechnungswaehrung) teilen sich das Konto mit anderen Spuren: dort zaehlt nur das
-        // Laufkapital plus der eigene uPnL. Spot bleibt bei der Paar-Equity (der
-        // Wertverlust der gekauften Basis ist dort der Verlust des Laufs).
-        run_equity: if position.is_perpetual && settle_currency.is_some() {
-            initial_capital + position.unrealized_pnl
-        } else {
-            equity
-        },
-    };
-
-    // Ein Auftrag, der die Position nur verkleinert, senkt das Risiko. An Verlust- oder
-    // Drawdown-Grenzen zu scheitern würde ein verlierendes Engagement festhalten.
-    let verkleinert = (order_req.side == Side::Sell && held > 0.0
-        || order_req.side == Side::Buy && held < 0.0)
-        && order_req.quantity <= held.abs() * 1.01;
-    if !verkleinert {
-        // Check risk guard
-        risk_guard
-            .check_order(&mock_order, &account, current_price)
-            .map_err(|e| {
-                // Der Guard misst das KONTO (alle Spuren auf demselben Konto), nicht das
-                // Kapital dieses Laufs. Bei einer Ablehnung gehoeren Spitze, Basis und
-                // aktuelle Equity ins Log - sonst bleibt die Ursache (Abbuchung, andere
-                // Spur, uPnL) hinterher nicht mehr feststellbar.
-                tracing::warn!(
-                    peak_equity = risk_guard.peak_equity(),
-                    run_baseline = ?risk_guard.run_baseline(),
-                    equity = equity,
-                    declared_initial = initial_capital,
-                    "RiskGuard lehnt ab: {e}"
-                );
-                LiveLoopError::RiskViolation(e.to_string())
-            })?;
-    }
-
-    // Die Abrufe oben können lange dauern. Der Not-Aus, der währenddessen gesetzt wurde,
-    // greift hier noch vor der Übermittlung (die Schleife prüft ihn nur im Sekundentakt).
-    if kill_switch::is_engaged(kill_file) {
-        return Err(LiveLoopError::RiskViolation(
-            "Not-Aus gesetzt - Auftrag nicht übermittelt".to_string(),
-        ));
-    }
-
-    // Risk check passed; submit order to exchange
-    exchange_trading
-        .place_order(order_req)
-        .await
-        .map_err(|e| LiveLoopError::ExchangeError(e.to_string()))
-}
+mod orders;
+pub(crate) use orders::{
+    cancel_open_orders, order_side, place_order_guarded, place_order_with_kill,
+    place_order_with_risk_check,
+};
+use orders::{halt_trading, spot_run_net};

@@ -94,6 +94,7 @@ async fn perpetual_drawdown_ignores_foreign_account_movements() {
             &req,
             50_000.0,
             50.0,
+            0.0,
             Some("USDT"),
             None,
             None,
@@ -115,16 +116,40 @@ async fn perpetual_drawdown_still_blocks_own_unrealized_loss() {
     let req = OrderRequest::market("BTCUSDT".into(), Side::Buy, 0.0001);
     let trading = trading_with(200.0, 0.0);
     *trading.pos_upl.lock().expect("upl") = (vec![4.0, -3.0], 0);
-    place_order_guarded(&trading, &mut guard, &req, 50_000.0, 50.0, Some("USDT"), None, None, Path::new(""))
-        .await
-        .expect("erste Order");
-    let res =
-        place_order_guarded(&trading, &mut guard, &req, 50_000.0, 50.0, Some("USDT"), None, None, Path::new(""))
-            .await;
-    assert!(matches!(res, Err(LiveLoopError::RiskViolation(_))), "{res:?}");
+    place_order_guarded(
+        &trading,
+        &mut guard,
+        &req,
+        50_000.0,
+        50.0,
+        0.0,
+        Some("USDT"),
+        None,
+        None,
+        Path::new(""),
+    )
+    .await
+    .expect("erste Order");
+    let res = place_order_guarded(
+        &trading,
+        &mut guard,
+        &req,
+        50_000.0,
+        50.0,
+        0.0,
+        Some("USDT"),
+        None,
+        None,
+        Path::new(""),
+    )
+    .await;
+    assert!(
+        matches!(res, Err(LiveLoopError::RiskViolation(_))),
+        "{res:?}"
+    );
 }
 
-fn perp(base_qty: f64, upl: f64) -> PositionSnapshot {
+pub(super) fn perp(base_qty: f64, upl: f64) -> PositionSnapshot {
     PositionSnapshot {
         is_perpetual: true,
         base_qty,
@@ -133,7 +158,7 @@ fn perp(base_qty: f64, upl: f64) -> PositionSnapshot {
     }
 }
 
-fn perp_with_liq(base_qty: f64, mark: f64, liq: Option<f64>) -> PositionSnapshot {
+pub(super) fn perp_with_liq(base_qty: f64, mark: f64, liq: Option<f64>) -> PositionSnapshot {
     PositionSnapshot {
         is_perpetual: true,
         base_qty,
@@ -358,11 +383,15 @@ fn adopt_existing_counts_startbestand_als_laufposition() {
     // Bestand 0.2 bei Start; ohne Adopt gilt er als fremd, mit Adopt zaehlt er.
     let mut fremd = ExposureLimit::new(25.0).allow_shorts(true);
     assert!(fremd.check(Side::Buy, 0.1, 95.0, 0.2).is_ok());
-    let mut eigen = ExposureLimit::new(25.0).allow_shorts(true).adopt_existing(true);
+    let mut eigen = ExposureLimit::new(25.0)
+        .allow_shorts(true)
+        .adopt_existing(true);
     // 0.2 + 0.1 = 0.3 * 95 = 28.5 > 25
     assert!(eigen.check(Side::Buy, 0.1, 95.0, 0.2).is_err());
     // Sell reduziert die uebernommene Position, kein Short.
-    let mut eigen = ExposureLimit::new(25.0).allow_shorts(true).adopt_existing(true);
+    let mut eigen = ExposureLimit::new(25.0)
+        .allow_shorts(true)
+        .adopt_existing(true);
     assert!(eigen.check(Side::Sell, 0.1, 95.0, 0.2).is_ok());
 }
 
@@ -464,187 +493,4 @@ fn exposure_cap_allows_flipping_own_long_into_short_when_enabled() {
         matches!(&flip, Err(m) if m.contains("übersteigt")),
         "{flip:?}"
     );
-}
-
-#[test]
-fn mainnet_cap_validation() {
-    assert!(valid_mainnet_cap(Some(20.0)));
-    assert!(valid_mainnet_cap(Some(MAINNET_HARD_CAP)));
-    for bad in [
-        None,
-        Some(0.0),
-        Some(-1.0),
-        Some(MAINNET_HARD_CAP + 0.01),
-        Some(f64::NAN),
-        Some(f64::INFINITY),
-    ] {
-        assert!(!valid_mainnet_cap(bad), "{bad:?}");
-    }
-}
-
-#[tokio::test]
-async fn mainnet_with_cap_above_hard_limit_is_rejected_before_any_exchange_call() {
-    // Arrange
-    let h = Harness::new("mainnet-over", BUY_BELOW_40K).with_cap(MAINNET_HARD_CAP + 1.0);
-
-    // Act
-    let result = h
-        .run(&[35000.0], Some(1000.0), Network::Mainnet, 0.001)
-        .await;
-
-    // Assert
-    assert!(matches!(result, Err(LiveLoopError::NetworkError(_))));
-    assert!(h.log.lock().expect("log").is_empty());
-}
-
-#[tokio::test]
-async fn mainnet_with_valid_cap_runs_and_blocks_orders_over_the_cap() {
-    // Arrange: Deckel 20, Order 0.001 BTC @ 35000 = 35 > 20 → blockiert, kein Aufruf an die Börse.
-    let h = Harness::new("mainnet-cap", BUY_BELOW_40K).with_cap(20.0);
-
-    // Act
-    let result = h
-        .run(&[35000.0], Some(1000.0), Network::Mainnet, 0.001)
-        .await;
-
-    // Assert
-    assert!(result.is_ok(), "{result:?}");
-    assert!(
-        h.placed.lock().expect("placed").is_empty(),
-        "Order über Deckel darf nicht raus"
-    );
-}
-
-#[tokio::test]
-async fn testnet_cap_allows_orders_within_the_cap() {
-    // Arrange: Deckel 50, Order 0.001 @ 35000 = 35 ≤ 50.
-    let h = Harness::new("testnet-cap", BUY_BELOW_40K).with_cap(50.0);
-
-    // Act
-    let result = h
-        .run(&[35000.0], Some(1000.0), Network::Testnet, 0.001)
-        .await;
-
-    // Assert
-    assert!(result.is_ok(), "{result:?}");
-    assert_eq!(h.placed.lock().expect("placed").len(), 1);
-}
-
-#[tokio::test]
-async fn non_positive_cap_is_rejected_even_on_testnet() {
-    let h = Harness::new("cap-zero", BUY_BELOW_40K).with_cap(0.0);
-    let result = h
-        .run(&[35000.0], Some(1000.0), Network::Testnet, 0.001)
-        .await;
-    assert!(matches!(result, Err(LiveLoopError::NetworkError(_))));
-}
-
-#[test]
-fn long_only_rejects_sell_without_position() {
-    // Ohne Deckel und ohne vorherigen Kauf darf ein Sell keine Kurzposition oeffnen.
-    let mut guard = LongOnlyGuard::new();
-    let r = guard.check(Side::Sell, 0.19, 0.0);
-    assert!(
-        r.is_err(),
-        "Sell bei flacher Position muss abgelehnt werden: {r:?}"
-    );
-}
-
-#[test]
-fn long_only_allows_sell_of_the_run_position() {
-    // Erst kaufen (Lauf-Baseline 0), dann genau die gekaufte Menge verkaufen.
-    let mut guard = LongOnlyGuard::new();
-    assert!(guard.check(Side::Buy, 5.0, 0.0).is_ok());
-    assert!(guard.check(Side::Sell, 5.0, 5.0).is_ok());
-}
-
-#[test]
-fn liquidation_beim_preis_null_sperrt_das_nachlegen_nicht() {
-    // OKX meldet liqPx "0", wenn es keine Liquidation gibt (1x isolated).
-    // Vorher machte der Parser daraus None und der Guard verweigerte JEDES
-    // Nachlegen ("Liquidationspreis oder Markpreis fehlt", Befund 21.10.2026).
-    let ohne_liq = PositionSnapshot {
-        is_perpetual: true,
-        base_qty: 0.1,
-        unrealized_pnl: 0.0,
-        liq_price: Some(0.0),
-        mark_price: Some(108.27),
-    };
-    assert!(
-        check_liquidation_distance(&ohne_liq, Side::Buy).is_ok(),
-        "ohne Liquidationspreis ist der Abstand 100 % - Nachlegen muss erlaubt sein"
-    );
-
-    // Gegenprobe: eine echte Liquidation dicht am Markpreis sperrt weiterhin.
-    let nah = PositionSnapshot {
-        is_perpetual: true,
-        base_qty: 0.1,
-        unrealized_pnl: 0.0,
-        liq_price: Some(106.0),
-        mark_price: Some(108.27),
-    };
-    assert!(
-        check_liquidation_distance(&nah, Side::Buy).is_err(),
-        "2,1 % Abstand zur Liquidation muss abgelehnt werden"
-    );
-}
-
-#[test]
-fn long_only_never_sells_pre_existing_stock() {
-    // Vorbestand 3: er zaehlt nicht zur Laufposition, ein Verkauf daraus scheitert.
-    let mut guard = LongOnlyGuard::new();
-    assert!(guard.check(Side::Buy, 1.0, 3.0).is_ok());
-    let r = guard.check(Side::Sell, 4.0, 4.0);
-    assert!(r.is_err(), "Vorbestand darf nicht verkauft werden: {r:?}");
-}
-
-/// XPERP traegt im Symbol `USD`, das Konto fuehrt USDC. Wer die Quote nimmt,
-/// findet keinen Bestand, bewertet das Konto mit 0 und der RiskGuard misst einen
-/// Drawdown von Millionen Prozent (gemessen 21.10.2026: 4.688.672 %).
-#[test]
-fn equity_nimmt_die_abrechnungswaehrung_wenn_die_quote_fehlt() {
-    let konto = |paare: &[(&str, f64)]| Account {
-        balances: paare
-            .iter()
-            .map(|(ccy, wert)| {
-                (
-                    (*ccy).to_string(),
-                    AccountBalance {
-                        free: *wert,
-                        locked: 0.0,
-                    },
-                )
-            })
-            .collect(),
-    };
-    let xperp = konto(&[("USDC", 46.43), ("SOL", 0.0)]);
-
-    // Act: Bewertungswaehrung und Equity eines offenen Shorts.
-    let waehrung = bewertungs_waehrung(&xperp, "USD", Some("USDC"));
-    let equity = account_equity(
-        &xperp,
-        "SOL",
-        waehrung,
-        106.46,
-        &PositionSnapshot {
-            is_perpetual: true,
-            base_qty: -0.1,
-            unrealized_pnl: -0.13,
-            liq_price: None,
-            mark_price: None,
-        },
-    );
-
-    // Assert: der Kontobestand zaehlt, nicht die leere Quote.
-    assert_eq!(waehrung, "USDC");
-    assert!(
-        (equity - 46.30).abs() < 1e-9,
-        "Equity muss 46.43 USDC + (-0.13) uPnL sein, war {equity}"
-    );
-
-    // Gegenprobe 1: traegt das Konto die Quote, bleibt sie die Bewertungswaehrung.
-    let swap = konto(&[("USDT", 100.0)]);
-    assert_eq!(bewertungs_waehrung(&swap, "USDT", Some("USDT")), "USDT");
-    // Gegenprobe 2: weder Quote noch Abrechnung vorhanden -> alte Regel, kein Panikwert.
-    assert_eq!(bewertungs_waehrung(&swap, "USD", Some("USDC")), "USD");
 }
