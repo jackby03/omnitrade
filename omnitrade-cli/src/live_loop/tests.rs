@@ -372,3 +372,18 @@ fn order_side_folgt_der_signierten_boersenposition() {
     assert_eq!(order_side(Hold, 0.0, true), None);
     assert_eq!(order_side(Hold, -0.5, true), None);
 }
+
+#[tokio::test]
+async fn buy_signal_while_already_long_is_skipped() {
+    // Arrange: Börse meldet bereits eine Long-Position; ein weiteres Kaufsignal darf nichts ordern.
+    let h = Harness::new("buy-while-long", BUY_BELOW_40K).with_position(0.1);
+
+    // Act
+    let result = h
+        .run(&[35000.0], Some(1000.0), Network::Testnet, 0.001)
+        .await;
+
+    // Assert
+    assert!(result.is_ok());
+    assert!(h.placed.lock().expect("placed").is_empty());
+}
