@@ -10,6 +10,7 @@ use super::*;
 ///
 /// Creates a mock Order from the request, checks it against RiskGuard,
 /// and if approved, submits to the exchange.
+#[cfg(test)]
 pub(crate) async fn place_order_with_risk_check(
     exchange_trading: &impl ExchangeTrading,
     risk_guard: &mut RiskGuard,

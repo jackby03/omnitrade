@@ -469,8 +469,9 @@ pub async fn live_loop(
 ///
 /// Bestände werden bewusst nicht verkauft.
 mod orders;
+#[cfg(test)]
+pub(crate) use orders::place_order_with_risk_check;
 pub(crate) use orders::{
     cancel_open_orders, order_side, place_order_guarded, place_order_with_kill,
-    place_order_with_risk_check,
 };
 use orders::{halt_trading, spot_run_net};

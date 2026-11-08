@@ -10,9 +10,7 @@
 
 use omnitrade_core::Side;
 use omnitrade_exchange::okx::instrument::inst_type_for_symbol;
-use omnitrade_exchange::{
-    ApiCredentials, ExchangeTrading, Network, OkxRestClient, OrderRequest,
-};
+use omnitrade_exchange::{ApiCredentials, ExchangeTrading, Network, OkxRestClient, OrderRequest};
 
 const DEFAULT_SYMBOL: &str = "BTC-USDT-SWAP";
 const DEFAULT_QTY_BASE: f64 = 0.0001; // 0.0001 BTC = 0.01 Kontrakte (ctVal 0.01)
@@ -34,18 +32,21 @@ async fn main() {
         .unwrap_or(DEFAULT_QTY_BASE);
     // Kontrakt-Typ aus EINER Quelle (Exchange-Crate): SWAP, XPERP und datierte
     // Futures. Kein Raten aus Symbolpraefixen mehr.
-    let inst_type = inst_type_for_symbol(symbol)
-        .unwrap_or_else(|| {
-            eprintln!("{symbol} ist kein kontraktbasiertes OKX-Symbol (erwartet -SWAP, _XPERP- oder -YYMMDD)");
-            std::process::exit(4);
-        });
+    let inst_type = inst_type_for_symbol(symbol).unwrap_or_else(|| {
+        eprintln!(
+            "{symbol} ist kein kontraktbasiertes OKX-Symbol (erwartet -SWAP, _XPERP- oder -YYMMDD)"
+        );
+        std::process::exit(4);
+    });
 
     let creds = ApiCredentials::new(
-            env("OKX_DEMO_API_KEY"),
-            env("OKX_DEMO_API_SECRET"),
-            Network::Testnet, //Demo: x-simulated-trading: 1, niemals echtes Geld
-        );
-    eprintln!("PROBE: symbol={symbol} inst_type={inst_type:?} (Zugangsdaten werden NICHT ausgegeben)");
+        env("OKX_DEMO_API_KEY"),
+        env("OKX_DEMO_API_SECRET"),
+        Network::Testnet, //Demo: x-simulated-trading: 1, niemals echtes Geld
+    );
+    eprintln!(
+        "PROBE: symbol={symbol} inst_type={inst_type:?} (Zugangsdaten werden NICHT ausgegeben)"
+    );
     let mut client = OkxRestClient::new(creds, env("OKX_DEMO_API_PASSPHRASE")).expect("client");
     if let Ok(base) = std::env::var("OKX_REST_BASE") {
         println!("API-Domain: {base}");
@@ -71,13 +72,13 @@ async fn main() {
     println!("ensure_net_mode ok (one-way)");
 
     // 4) Kleine Market-Buy-Order.
-        // For XPERP (Futures), qty_base is interpreted as contract quantity directly
-        // because swap_order_body now handles Futures vs SWAP conversion.
-        let buy = client
-            .place_order(&OrderRequest::market(symbol.into(), Side::Buy, qty_base))
-            .await
-            .expect("market buy");
-        println!("Market-Buy angelegt: id={} (qty={})", buy.id, qty_base);
+    // For XPERP (Futures), qty_base is interpreted as contract quantity directly
+    // because swap_order_body now handles Futures vs SWAP conversion.
+    let buy = client
+        .place_order(&OrderRequest::market(symbol.into(), Side::Buy, qty_base))
+        .await
+        .expect("market buy");
+    println!("Market-Buy angelegt: id={} (qty={})", buy.id, qty_base);
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // 5) Positionsantwort lesen (pos/upl/liqPx/markPx).
@@ -91,11 +92,11 @@ async fn main() {
     );
 
     // 6) Schließen: gleiche Menge zurückverkaufen.
-        let sell = client
-            .place_order(&OrderRequest::market(symbol.into(), Side::Sell, qty_base))
-            .await
-            .expect("market sell");
-        println!("Market-Sell angelegt: id={}", sell.id);
+    let sell = client
+        .place_order(&OrderRequest::market(symbol.into(), Side::Sell, qty_base))
+        .await
+        .expect("market sell");
+    println!("Market-Sell angelegt: id={}", sell.id);
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let after = client
         .position_snapshot(symbol)
