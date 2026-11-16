@@ -2,7 +2,7 @@
 //! Liquidationsabstand und Positionsdeckel.
 
 use omnitrade_core::Side;
-use omnitrade_exchange::{Account, PositionSnapshot};
+use omnitrade_exchange::{Account, FillDetails, PositionSnapshot};
 
 use super::run_state::baseline_for;
 use super::{KNOWN_QUOTES, MAINNET_HARD_CAP};
@@ -149,8 +149,8 @@ pub(crate) fn check_liquidation_distance(
 
 /// Realisierter PnL beim Verringern einer Perpetual-Position. Er entspricht dem
 /// zuletzt bekannten unrealisierten PnL des geschlossenen Anteils. Ein Vorzeichenwechsel
-/// schliesst die alte Position ganz. Naeherung: Gebuehren und die Abweichung zwischen
-/// Marktpreis und Fuellpreis fehlen.
+/// schliesst die alte Position ganz. Naeherung: die Abweichung zwischen Marktpreis und
+/// Fuellpreis fehlt. Gebuehren kommen getrennt dazu, siehe [`perp_gebuehr`].
 pub(crate) fn realisiert_beim_schliessen(
     vorher: &PositionSnapshot,
     nachher: &PositionSnapshot,
@@ -169,6 +169,52 @@ pub(crate) fn realisiert_beim_schliessen(
         return 0.0;
     }
     vorher.unrealized_pnl * (geschlossen / alt.abs()).min(1.0)
+}
+
+/// Gebuehr einer Ausfuehrung in der Abrechnungswaehrung, Vorzeichen wie von der Boerse
+/// (Kosten negativ). Abrechnungs- und Quote-Waehrung zaehlen 1:1 (dieselbe Annahme wie
+/// in [`bewertungs_waehrung`]), eine Gebuehr in der Basis wird zum Fuellpreis
+/// umgerechnet. `None` bei fremder Waehrung oder unbrauchbarer Zahl.
+pub(crate) fn gebuehr_in_abrechnung(
+    fill: &FillDetails,
+    base: &str,
+    quote: &str,
+    settle: Option<&str>,
+) -> Option<f64> {
+    if !fill.fee.is_finite() {
+        return None;
+    }
+    if fill.fee == 0.0 {
+        return Some(0.0);
+    }
+    let gleich = |ccy: &str| ccy.eq_ignore_ascii_case(&fill.fee_ccy);
+    if gleich(quote) || settle.is_some_and(gleich) {
+        return Some(fill.fee);
+    }
+    if gleich(base) && fill.avg_price.is_finite() && fill.avg_price > 0.0 {
+        return Some(fill.fee * fill.avg_price);
+    }
+    None
+}
+
+/// Beitrag einer Perpetual-Ausfuehrung zum Laufeigenkapital: die Gebuehr in der
+/// Abrechnungswaehrung. Fehlen die Ausfuehrungsdaten oder ist die Waehrung fremd, wird
+/// nichts gebucht und gewarnt: das Laufeigenkapital ist dann um diese Gebuehr zu hoch.
+pub(crate) fn perp_gebuehr(fill: Option<&FillDetails>, symbol: &str, settle: Option<&str>) -> f64 {
+    let Some(fill) = fill else {
+        tracing::warn!("Gebuehr unbekannt (keine Ausfuehrungsdaten): Laufeigenkapital ohne sie");
+        return 0.0;
+    };
+    let wert = split_symbol(symbol)
+        .and_then(|(base, quote)| gebuehr_in_abrechnung(fill, &base, &quote, settle));
+    wert.unwrap_or_else(|| {
+        tracing::warn!(
+            "Gebuehr {} {} nicht bewertbar: Laufeigenkapital ohne sie",
+            fill.fee,
+            fill.fee_ccy
+        );
+        0.0
+    })
 }
 
 /// Menge, auf die der Positionsdeckel wirkt: bei Perpetuals die Positionsmenge,
