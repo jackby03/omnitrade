@@ -1,7 +1,7 @@
 //! Auftragsplatzierung im Live-Lauf: Risikopruefung, Not-Aus und Uebermittlung.
 
 use omnitrade_core::Side;
-use omnitrade_exchange::{ExchangeTrading, OrderRequest};
+use omnitrade_exchange::{ExchangeTrading, FillDetails, OrderRequest};
 use omnitrade_risk::guard::RiskGuard;
 
 use super::run_state::RunState;
@@ -67,7 +67,8 @@ pub(crate) async fn place_order_guarded(
     order_req: &OrderRequest,
     current_price: f64,
     initial_capital: f64,
-    // Bereits realisierter PnL dieses Laufs (Abrechnungswaehrung), siehe realisiert_beim_schliessen.
+    // Realisierter PnL und Gebuehren dieses Laufs (Abrechnungswaehrung), siehe
+    // realisiert_beim_schliessen und perp_gebuehr.
     run_realized: f64,
     // Abrechnungswaehrung des Instruments; `None` = Quote des Symbols.
     settle_currency: Option<&str>,
@@ -103,8 +104,8 @@ pub(crate) async fn place_order_guarded(
         initial: f64,
         current: f64,
         pnl: f64,
-        /// Equity des LAUF-Kapitals: deklariertes Startkapital + uPnL der eigenen
-        /// Position. Das Konto ist geteilt und taugt nicht als Drawdown-Basis.
+        /// Equity des LAUF-Kapitals: deklariertes Startkapital + realisierter PnL und
+        /// Gebuehren des Laufs + uPnL der eigenen Position. Das Konto ist geteilt und taugt nicht als Drawdown-Basis.
         run_equity: f64,
     }
 
@@ -219,6 +220,22 @@ pub(crate) async fn place_order_guarded(
         .place_order(order_req)
         .await
         .map_err(|e| LiveLoopError::ExchangeError(e.to_string()))
+}
+
+/// Ausfuehrungsdaten einer Order, best effort: ohne sie bleiben Gebuehr und Slippage
+/// im Status als unvollstaendig markiert, der Lauf laeuft weiter.
+pub(super) async fn fill_oder_warnung(
+    exchange: &impl ExchangeTrading,
+    order_id: &str,
+    symbol: &str,
+) -> Option<FillDetails> {
+    match exchange.fill_details(order_id, symbol).await {
+        Ok(fill) => fill,
+        Err(e) => {
+            warn!("Ausfuehrungsdaten nicht lesbar: {}", e);
+            None
+        }
+    }
 }
 
 /// Laufbestand bei Spot: Kontostand der Basiswaehrung minus Vorbestand. Der Vorbestand

@@ -67,6 +67,9 @@ pub(crate) struct MockTrading {
     /// uPnL, die die Boerse je Abruf meldet (Reihe, letzter Wert bleibt stehen).
     /// Damit laesst sich der Ablauf "erst Peak, dann Verlust" nachstellen.
     pub(crate) pos_upl: Arc<Mutex<(Vec<f64>, usize)>>,
+    /// Gebuehr je Ausfuehrung (Vorzeichen der Boerse) und ihre Waehrung; `None` =
+    /// die Boerse liefert keine Ausfuehrungsdaten.
+    pub(crate) gebuehr: Option<(f64, &'static str)>,
     pub(crate) placed: Arc<Mutex<Vec<OrderRequest>>>,
     pub(crate) cancelled: Arc<Mutex<Vec<String>>>,
 }
@@ -119,6 +122,21 @@ impl ExchangeTrading for MockTrading {
             updated_at_ms: 0,
             trailing_highest_price: None,
         }])
+    }
+
+    async fn fill_details(
+        &self,
+        _order_id: &str,
+        _symbol: &str,
+    ) -> Result<Option<omnitrade_exchange::FillDetails>, ExchangeError> {
+        Ok(self
+            .gebuehr
+            .map(|(fee, ccy)| omnitrade_exchange::FillDetails {
+                filled: 1.0,
+                avg_price: 100.0,
+                fee,
+                fee_ccy: ccy.to_string(),
+            }))
     }
 
     async fn position_snapshot(
@@ -185,6 +203,7 @@ pub(crate) struct Harness {
     pub(crate) symbol: &'static str,
     pub(crate) konto_waehrung: &'static str,
     pub(crate) upl_reihe: Vec<f64>,
+    pub(crate) gebuehr: Option<(f64, &'static str)>,
 }
 
 impl Harness {
@@ -222,7 +241,14 @@ impl Harness {
             symbol: "BTCUSDT",
             konto_waehrung: "USDT",
             upl_reihe: Vec::new(),
+            gebuehr: None,
         }
+    }
+
+    /// Laesst die Boerse je Ausfuehrung diese Gebuehr melden (Kosten negativ).
+    pub(crate) fn with_gebuehr(mut self, fee: f64, ccy: &'static str) -> Self {
+        self.gebuehr = Some((fee, ccy));
+        self
     }
 
     /// Laesst die Boerse je Abruf diese uPnL melden (letzter Wert bleibt).
@@ -287,6 +313,7 @@ impl Harness {
             pos_qty: self.pos_qty,
             waehrung: self.konto_waehrung,
             pos_upl: Arc::new(Mutex::new((self.upl_reihe.clone(), 0))),
+            gebuehr: self.gebuehr,
             placed: self.placed.clone(),
             cancelled: self.cancelled.clone(),
         };
@@ -340,6 +367,7 @@ pub(crate) fn trading_with(usdt: f64, btc: f64) -> MockTrading {
         pos_qty: 0.0,
         waehrung: "USDT",
         pos_upl: Arc::default(),
+        gebuehr: None,
         placed: Arc::default(),
         cancelled: Arc::default(),
     }

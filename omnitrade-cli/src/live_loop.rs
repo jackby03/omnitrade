@@ -34,8 +34,8 @@ mod tests;
 
 pub(crate) use risk::{
     account_equity, bewertungs_waehrung, check_liquidation_distance, held_base,
-    is_derivative_symbol, realisiert_beim_schliessen, run_guards, split_symbol, valid_mainnet_cap,
-    ExposureLimit, LongOnlyGuard,
+    is_derivative_symbol, perp_gebuehr, realisiert_beim_schliessen, run_guards, split_symbol,
+    valid_mainnet_cap, ExposureLimit, LongOnlyGuard,
 };
 
 /// Maximale Anzahl Kerzen, die für die Skript-Auswertung vorgehalten werden.
@@ -226,7 +226,7 @@ pub async fn live_loop(
     }
     // Zustand der Skript-Auswertung (Trailing-Stop-Hoch etc.) über alle Kerzen.
     let mut script_state = EvaluatorState::new(0.0);
-    // Perpetual: realisierter PnL des Laufs und der Positionsstand der letzten Kerze.
+    // Perpetual: realisierter PnL und Gebuehren des Laufs, Positionsstand der letzten Kerze.
     let mut run_realized = 0.0_f64;
     let mut perp_zuvor: Option<PositionSnapshot> = None;
     if allow_shorts {
@@ -451,18 +451,13 @@ pub async fn live_loop(
             Ok(order) => {
                 info!("Order filled: {:?}", order);
                 let side_name = if side == Side::Buy { "buy" } else { "sell" };
-                // Ausfuehrungsdaten sind best effort: ohne sie bleiben Gebuehr und
-                // Slippage im Status als unvollstaendig markiert, der Lauf laeuft weiter.
-                let fill = match exchange_trading
-                    .fill_details(&order.id.to_string(), symbol)
-                    .await
-                {
-                    Ok(f) => f,
-                    Err(e) => {
-                        warn!("Ausfuehrungsdaten nicht lesbar: {}", e);
-                        None
-                    }
-                };
+                let fill =
+                    fill_oder_warnung(&exchange_trading, &order.id.to_string(), symbol).await;
+                // Perpetual: die Gebuehr zaehlt zum Laufeigenkapital. Bei Spot steckt
+                // sie schon im Kontostand, aus dem die Paar-Equity gerechnet wird.
+                if !is_spot {
+                    run_realized += perp_gebuehr(fill.as_ref(), symbol, settle_currency);
+                }
                 status.record_order_fill(side_name, qty, candle.close, "placed", "", fill.as_ref());
                 flush_status(status);
             }
@@ -494,4 +489,6 @@ pub(crate) use orders::place_order_with_risk_check;
 pub(crate) use orders::{
     cancel_open_orders, order_side, place_order_guarded, place_order_with_kill,
 };
-use orders::{halt_trading, is_spot_dust_sell, spot_run_net, SPOT_DUST_NOTIONAL_USD};
+use orders::{
+    fill_oder_warnung, halt_trading, is_spot_dust_sell, spot_run_net, SPOT_DUST_NOTIONAL_USD,
+};

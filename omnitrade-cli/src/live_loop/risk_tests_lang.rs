@@ -150,3 +150,99 @@ fn realisierter_pnl_beim_schliessen_folgt_dem_geschlossenen_anteil() {
         0.0
     );
 }
+
+fn ausfuehrung(fee: f64, ccy: &str) -> omnitrade_exchange::FillDetails {
+    omnitrade_exchange::FillDetails {
+        filled: 0.1,
+        avg_price: 100.0,
+        fee,
+        fee_ccy: ccy.to_string(),
+    }
+}
+
+#[test]
+fn gebuehr_in_abrechnungs_oder_quote_waehrung_zaehlt_eins_zu_eins() {
+    // XPERP: Symbol sagt USD, das Konto rechnet in USDC ab.
+    let usdc = gebuehr_in_abrechnung(&ausfuehrung(-0.02, "USDC"), "SOL", "USD", Some("USDC"));
+    assert_eq!(usdc, Some(-0.02));
+    let quote = gebuehr_in_abrechnung(&ausfuehrung(-0.02, "usdt"), "BTC", "USDT", None);
+    assert_eq!(quote, Some(-0.02));
+    // Ein Rabatt (positiv) erhoeht das Laufeigenkapital.
+    let rabatt = gebuehr_in_abrechnung(&ausfuehrung(0.01, "USDC"), "SOL", "USD", Some("USDC"));
+    assert_eq!(rabatt, Some(0.01));
+}
+
+#[test]
+fn gebuehr_in_der_basis_wird_zum_fuellpreis_umgerechnet() {
+    // -0.0001 SOL zu 100 = -0.01 in der Abrechnungswaehrung.
+    let wert = gebuehr_in_abrechnung(&ausfuehrung(-0.0001, "SOL"), "SOL", "USD", Some("USDC"))
+        .expect("Basis ist umrechenbar");
+    assert!((wert + 0.01).abs() < 1e-12, "{wert}");
+}
+
+#[test]
+fn gebuehr_in_fremder_waehrung_oder_ohne_zahl_ist_unbekannt() {
+    let fremd = gebuehr_in_abrechnung(&ausfuehrung(-1.0, "OKB"), "SOL", "USD", Some("USDC"));
+    assert_eq!(fremd, None, "OKB laesst sich hier nicht bewerten");
+    let nan = gebuehr_in_abrechnung(&ausfuehrung(f64::NAN, "USDC"), "SOL", "USD", Some("USDC"));
+    assert_eq!(nan, None);
+    // Gebuehr 0 ist bekannt, auch ohne Waehrung.
+    let null = gebuehr_in_abrechnung(&ausfuehrung(0.0, ""), "SOL", "USD", Some("USDC"));
+    assert_eq!(null, Some(0.0));
+}
+
+#[test]
+fn perp_gebuehr_ohne_ausfuehrungsdaten_bucht_nichts() {
+    assert_eq!(
+        perp_gebuehr(None, "SOL-USD_UM_XPERP-310404", Some("USDC")),
+        0.0
+    );
+    let fremd = ausfuehrung(-1.0, "OKB");
+    assert_eq!(
+        perp_gebuehr(Some(&fremd), "SOL-USD_UM_XPERP-310404", Some("USDC")),
+        0.0
+    );
+    let ok = ausfuehrung(-0.02, "USDC");
+    assert_eq!(
+        perp_gebuehr(Some(&ok), "SOL-USD_UM_XPERP-310404", Some("USDC")),
+        -0.02
+    );
+}
+
+/// Codex-P2 auf PR #1: Gebuehren gehoeren ins Laufeigenkapital. Drei Auftraege
+/// mit je 150 Gebuehr auf 1000 Laufkapital: vor dem dritten steht der Lauf bei
+/// 700, das sind 30 % Drawdown gegen die 25 % des Testnets. Ohne Gebuehren
+/// gehen alle drei durch.
+#[tokio::test]
+async fn gebuehren_senken_das_laufeigenkapital_bis_zur_drawdown_bremse() {
+    use super::test_support::{Harness, SELL_ABOVE_40K};
+    use omnitrade_exchange::Network;
+
+    let lauf = |name: &str, gebuehr: f64| {
+        Harness::new(name, SELL_ABOVE_40K)
+            .with_allow_shorts()
+            .with_symbol("SOL-USD_UM_XPERP-310404")
+            .with_settle("USDC")
+            .with_konto_waehrung("USDC")
+            .with_gebuehr(gebuehr, "USDC")
+    };
+    let kerzen = [45_000.0, 46_000.0, 47_000.0];
+
+    let ohne = lauf("gebuehr-ohne", 0.0);
+    let res = ohne
+        .run(&kerzen, Some(1000.0), Network::Testnet, 0.001)
+        .await;
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(ohne.placed.lock().expect("placed").len(), 3);
+
+    let mit = lauf("gebuehr-mit", -150.0);
+    let res = mit
+        .run(&kerzen, Some(1000.0), Network::Testnet, 0.001)
+        .await;
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(
+        mit.placed.lock().expect("placed").len(),
+        2,
+        "der dritte Auftrag muss an der Drawdown-Bremse scheitern"
+    );
+}
