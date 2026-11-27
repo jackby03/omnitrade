@@ -1,0 +1,2 @@
+if close() > sma(200) && rsi(14) < 40 { stop_loss_pct(0.05); buy() }
+if close() < sma(200) && rsi(14) > 60 { stop_loss_pct(0.05); sell() }

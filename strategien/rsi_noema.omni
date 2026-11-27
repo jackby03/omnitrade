@@ -1,0 +1,2 @@
+if rsi(14) < 30 { buy() }
+if rsi(14) > 70 { sell() }

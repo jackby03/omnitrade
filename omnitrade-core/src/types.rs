@@ -26,7 +26,7 @@ impl Side {
 }
 
 /// Type of order to be placed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum OrderType {
     /// Execute immediately at best available price.
     Market,
@@ -36,6 +36,21 @@ pub enum OrderType {
     StopMarket,
     /// Trigger a limit order when stop price is reached.
     StopLimit,
+    /// Stop-Loss: trigger when candle low <= trigger_price.
+    /// Executes at trigger_price or limit_price (if specified).
+    StopLoss {
+        trigger_price: f64,
+        limit_price: Option<f64>,
+    },
+    /// Take-Profit: trigger when candle high >= trigger_price.
+    /// Executes at trigger_price or limit_price (if specified).
+    TakeProfit {
+        trigger_price: f64,
+        limit_price: Option<f64>,
+    },
+    /// Trailing-Stop: maintains highest price, triggers when
+    /// current price falls below (highest * (1 - percent)).
+    TrailingStop { percent: f64 },
 }
 
 /// Time-in-force policy for an order.
@@ -173,6 +188,9 @@ pub struct Order {
     pub created_at_ms: u64,
     /// Timestamp when the order was last updated (ms since epoch).
     pub updated_at_ms: u64,
+    /// For TrailingStop: highest price observed since order creation.
+    /// Persists across candles for accurate trailing calculations.
+    pub trailing_highest_price: Option<f64>,
 }
 
 impl Order {
@@ -234,6 +252,29 @@ impl Position {
         self.entry_price * self.quantity
     }
 
+    /// Signed market value of the position at its last mark.
+    ///
+    /// `notional_value()` is the ENTRY value and carries no sign: a short is
+    /// booked as cash inflow in `AccountState::apply_sell_fill`, so its market
+    /// value has to be negative or the account would count the borrowed
+    /// inventory as an asset. With `unrealized_pnl` (set by `mark_to_market`)
+    /// this is `+/- quantity * current_price`:
+    ///
+    ///   Long:  entry*qty + (price-entry)*qty = price*qty
+    ///   Short: -entry*qty + (entry-price)*qty = -price*qty
+    ///
+    /// Before the first mark `unrealized_pnl` is 0, so the value is the entry
+    /// notional - correct at the moment of the fill.
+    #[inline]
+    #[must_use]
+    pub fn market_value(&self) -> f64 {
+        let vorzeichen = match self.side {
+            Side::Buy => 1.0,
+            Side::Sell => -1.0,
+        };
+        vorzeichen * self.notional_value() + self.unrealized_pnl
+    }
+
     /// Updates unrealized PnL based on the current market price.
     pub fn mark_to_market(&mut self, current_price: f64) {
         let price_delta = current_price - self.entry_price;
@@ -292,6 +333,7 @@ mod tests {
             status: OrderStatus::PartiallyFilled,
             created_at_ms: 1_000_000,
             updated_at_ms: 1_000_001,
+            trailing_highest_price: None,
         };
         assert!((order.remaining_quantity() - 0.7).abs() < f64::EPSILON);
         assert!(order.is_active());
@@ -318,6 +360,7 @@ mod tests {
                 status,
                 created_at_ms: 0,
                 updated_at_ms: 0,
+                trailing_highest_price: None,
             };
             assert!(order.is_terminal());
             assert!(!order.is_active());

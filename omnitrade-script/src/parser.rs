@@ -67,8 +67,19 @@ impl<'a> Parser<'a> {
             Token::If => self.parse_if_stmt()?,
             Token::Buy => self.parse_signal_stmt(true)?,
             Token::Sell => self.parse_signal_stmt(false)?,
-            Token::Identifier(_) if self.peek_nth(1) == &Token::Assign => {
+            Token::Identifier(name) if self.peek_nth(1) == &Token::Assign => {
                 self.parse_assign_stmt()?
+            }
+            Token::Identifier(name) if self.peek_nth(1) == &Token::LParen => {
+                // Check for order-intent keywords
+                match name.as_str() {
+                    "stop_loss" => self.parse_stop_loss_stmt()?,
+                    "take_profit" => self.parse_take_profit_stmt()?,
+                    "trailing_stop" => self.parse_trailing_stop_stmt()?,
+                    "stop_loss_pct" => self.parse_pct_stmt(Stmt::StopLossPct)?,
+                    "take_profit_pct" => self.parse_pct_stmt(Stmt::TakeProfitPct)?,
+                    _ => Stmt::ExprStmt(self.parse_expr()?),
+                }
             }
             _ => Stmt::ExprStmt(self.parse_expr()?),
         };
@@ -124,6 +135,42 @@ impl<'a> Parser<'a> {
         } else {
             Stmt::SignalSell
         })
+    }
+
+    /// Gemeinsamer Parser fuer name(ausdruck)-Direktiven mit einem Zahlwert.
+    fn parse_pct_stmt(&mut self, make: fn(Expr) -> Stmt) -> Result<Stmt, ScriptError> {
+        self.advance(); // consume directive name
+        self.consume(&Token::LParen, "expected '(' after risk directive")?;
+        let expr = self.parse_expr()?;
+        self.consume(&Token::RParen, "expected ')' after risk directive value")?;
+        Ok(make(expr))
+    }
+
+    fn parse_stop_loss_stmt(&mut self) -> Result<Stmt, ScriptError> {
+        self.advance(); // consume 'stop_loss'
+        self.consume(&Token::LParen, "expected '(' after stop_loss")?;
+        let expr = self.parse_expr()?;
+        self.consume(&Token::RParen, "expected ')' after stop_loss price")?;
+        Ok(Stmt::StopLoss(expr))
+    }
+
+    fn parse_take_profit_stmt(&mut self) -> Result<Stmt, ScriptError> {
+        self.advance(); // consume 'take_profit'
+        self.consume(&Token::LParen, "expected '(' after take_profit")?;
+        let expr = self.parse_expr()?;
+        self.consume(&Token::RParen, "expected ')' after take_profit price")?;
+        Ok(Stmt::TakeProfit(expr))
+    }
+
+    fn parse_trailing_stop_stmt(&mut self) -> Result<Stmt, ScriptError> {
+        self.advance(); // consume 'trailing_stop'
+        self.consume(&Token::LParen, "expected '(' after trailing_stop")?;
+        let expr = self.parse_expr()?;
+        self.consume(
+            &Token::RParen,
+            "expected ')' after trailing_stop percentage",
+        )?;
+        Ok(Stmt::TrailingStop(expr))
     }
 
     fn parse_assign_stmt(&mut self) -> Result<Stmt, ScriptError> {
@@ -446,6 +493,45 @@ mod tests {
             op: BinaryOp::Add,
             right: Box::new(Expr::Number(10.0)),
         })];
+        assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn test_parse_stop_loss_statement() {
+        // Arrange
+        let tokens = tokenize("stop_loss(100.5)").expect("tokenization should succeed");
+
+        // Act
+        let ast = parse(&tokens).expect("parsing should succeed");
+
+        // Assert
+        let expected = vec![Stmt::StopLoss(Expr::Number(100.5))];
+        assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn test_parse_take_profit_statement() {
+        // Arrange
+        let tokens = tokenize("take_profit(150)").expect("tokenization should succeed");
+
+        // Act
+        let ast = parse(&tokens).expect("parsing should succeed");
+
+        // Assert
+        let expected = vec![Stmt::TakeProfit(Expr::Number(150.0))];
+        assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn test_parse_trailing_stop_statement() {
+        // Arrange
+        let tokens = tokenize("trailing_stop(0.05)").expect("tokenization should succeed");
+
+        // Act
+        let ast = parse(&tokens).expect("parsing should succeed");
+
+        // Assert
+        let expected = vec![Stmt::TrailingStop(Expr::Number(0.05))];
         assert_eq!(ast, expected);
     }
 }

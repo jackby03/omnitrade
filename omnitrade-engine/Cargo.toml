@@ -9,6 +9,8 @@ repository.workspace = true
 
 [dependencies]
 omnitrade-core = { path = "../omnitrade-core" }
+omnitrade-risk = { path = "../omnitrade-risk" }
+omnitrade-script = { path = "../omnitrade-script" }
 thiserror = "2"
 tracing = "0.1"
 

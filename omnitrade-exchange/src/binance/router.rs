@@ -74,6 +74,11 @@ impl BinanceRouter {
                         return Ok(());
                     }
                 };
+                // Binance sendet pro Kerze mehrere Zwischenstände; nur die
+                // abgeschlossene Kerze (x == true) ist für Strategien gültig.
+                if !kline_evt.k.x {
+                    return Ok(());
+                }
                 let symbol = kline_evt.s.to_uppercase();
                 let candle = Candle::try_from(kline_evt)?;
                 if let Some(sender) = self.candle_senders.get(&symbol) {
@@ -156,6 +161,25 @@ mod tests {
             .expect("should receive candle on registered channel");
         assert_eq!(candle.timestamp_ms, 123400000);
         assert_eq!(candle.close, 50100.0);
+    }
+
+    #[test]
+    fn unfinished_kline_is_not_routed() {
+        // Arrange
+        let (_tx, rx) = mpsc::channel(10);
+        let mut router = BinanceRouter::new(rx);
+        let mut candle_rx = router.register_candle_channel("BTCUSDT");
+        let open_kline = KLINE_JSON.replace("\"x\": true", "\"x\": false");
+
+        // Act
+        let result = router.process_raw_message(&open_kline);
+
+        // Assert
+        assert!(result.is_ok());
+        assert!(
+            candle_rx.try_recv().is_err(),
+            "unfertige Kerze darf nicht weitergereicht werden"
+        );
     }
 
     #[test]

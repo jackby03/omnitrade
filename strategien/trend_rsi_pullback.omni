@@ -1,0 +1,2 @@
+if close() > sma(200) && rsi(14) < 40 { buy() }
+if close() < sma(200) && rsi(14) > 60 { sell() }

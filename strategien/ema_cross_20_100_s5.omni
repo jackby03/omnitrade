@@ -1,0 +1,2 @@
+if ema(20) > ema(100) { stop_loss_pct(0.05); buy() }
+if ema(20) < ema(100) { stop_loss_pct(0.05); sell() }

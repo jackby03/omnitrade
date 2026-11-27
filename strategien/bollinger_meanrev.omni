@@ -1,0 +1,2 @@
+if close() < bb_lower(20, 2) { buy() }
+if close() > bb_mid(20, 2) { sell() }

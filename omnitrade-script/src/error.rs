@@ -34,6 +34,13 @@ pub enum ScriptError {
         message: String,
     },
 
+    /// Not enough candles yet for an indicator or lookback (warm-up, not a script bug).
+    #[error("evaluation error: {message}")]
+    InsufficientHistory {
+        /// Detailed description of the missing history.
+        message: String,
+    },
+
     /// An undefined variable was referenced.
     #[error("undefined variable: {name}")]
     UndefinedVariable {

@@ -115,7 +115,7 @@ impl CandleChartWidget {
 
             painter.line_segment(
                 [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-                Stroke::new(1.0, Color32::from_gray(50)),
+                Stroke::new(1.0_f32, Color32::from_gray(50)),
             );
 
             painter.text(
@@ -154,7 +154,7 @@ impl CandleChartWidget {
             // Wick
             painter.line_segment(
                 [Pos2::new(x_center, high_y), Pos2::new(x_center, low_y)],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
 
             // Body

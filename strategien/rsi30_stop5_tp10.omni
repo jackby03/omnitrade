@@ -1,0 +1,2 @@
+stop_loss_pct(0.05); if ema(20) > ema(50) && rsi(14) < 30 { take_profit_pct(0.1); buy() }
+stop_loss_pct(0.05); if ema(20) < ema(50) && rsi(14) > 70 { sell() }

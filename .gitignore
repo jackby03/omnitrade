@@ -27,3 +27,23 @@ Thumbs.db
 *.p12
 *.pfx
 secrets/
+*.pub
+*.crt
+*.cer
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+.env.*
+!.env.example
+*credentials*.json
+*credentials*.toml
+*api-key*
+*apikey*
+*api_secret*
+*-keys.txt
+
+# Claude-Code-Worktrees gehoeren nicht in den Verlauf; Projekt-Skills schon.
+.claude/*
+!.claude/skills/
+/target-live/

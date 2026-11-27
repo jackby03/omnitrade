@@ -9,14 +9,47 @@ use omnitrade_core::{Candle, Ema, Rsi, Sma};
 
 use crate::ast::{BinaryOp, Expr, Signal, Stmt};
 use crate::error::ScriptError;
+use crate::extra;
+#[path = "evaluator_args.rs"]
+mod evaluator_args;
+use crate::order_intent::{EvaluatorState, OrderIntent};
+
+/// Prozentwerte fuer Stop/Take-Profit muessen zwischen 0 und 1 liegen (exklusiv).
+fn check_pct(name: &str, pct: f64) -> Result<(), ScriptError> {
+    if pct.is_finite() && pct > 0.0 && pct < 1.0 {
+        Ok(())
+    } else {
+        Err(ScriptError::EvalError {
+            message: format!(
+                "{name} muss zwischen 0 und 1 liegen (z. B. 0.03 fuer 3 %), ist {pct}"
+            ),
+        })
+    }
+}
+
+fn short(name: &str, candles: &[Candle]) -> ScriptError {
+    ScriptError::InsufficientHistory {
+        message: format!("insufficient candles ({}) for {name}", candles.len()),
+    }
+}
 
 /// Evaluator for strategy scripts.
 ///
 /// Maintains variable state across statement evaluations.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Evaluator {
     /// Environment map storing variable bindings.
     pub variables: HashMap<String, f64>,
+    /// Current order intent tracking TP/SL/Trailing.
+    current_intent: OrderIntent,
+    /// Variable bindings as they stood before the current candle; `prev()` reads them.
+    previous_variables: HashMap<String, f64>,
+}
+
+impl Default for Evaluator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Evaluator {
@@ -24,7 +57,14 @@ impl Evaluator {
     pub fn new() -> Self {
         Self {
             variables: HashMap::new(),
+            current_intent: OrderIntent::default(),
+            previous_variables: HashMap::new(),
         }
+    }
+
+    /// Returns the current order intent.
+    pub fn current_intent(&self) -> &OrderIntent {
+        &self.current_intent
     }
 
     /// Evaluates a sequence of strategy statements against market candle data.
@@ -38,13 +78,65 @@ impl Evaluator {
             });
         }
 
+        self.begin_evaluation();
+        // Alle Statements auswerten, damit stop_loss/take_profit/trailing_stop
+        // auch hinter buy()/sell() gelesen werden. Das erste Signal gewinnt.
+        let mut first = None;
         for stmt in stmts {
             if let Some(signal) = self.eval_stmt(stmt, candles)? {
-                return Ok(signal);
+                first.get_or_insert(signal);
+            }
+        }
+        let signal = first.unwrap_or(Signal::Hold);
+        self.current_intent.signal = signal;
+        Ok(signal)
+    }
+
+    /// Setzt die Auswertung fuer eine neue Kerze zurueck: der Order-Intent beginnt
+    /// leer, und die Variablen der vorherigen Kerze werden fuer `prev()` gesichert.
+    fn begin_evaluation(&mut self) {
+        self.current_intent = OrderIntent::default();
+        self.previous_variables = self.variables.clone();
+    }
+
+    /// Evaluates statements and returns complete OrderIntent with risk parameters.
+    ///
+    /// Processes all statements (including risk parameters) before returning.
+    /// Trailing stop triggers are evaluated after all statements execute.
+    ///
+    /// # Errors
+    /// Returns [`ScriptError::EvalError`] if `candles` is empty or runtime evaluation fails.
+    pub fn evaluate_extended(
+        &mut self,
+        stmts: &[Stmt],
+        candles: &[Candle],
+        state: &mut EvaluatorState,
+    ) -> Result<OrderIntent, ScriptError> {
+        if candles.is_empty() {
+            return Err(ScriptError::EvalError {
+                message: "candles dataset cannot be empty".to_string(),
+            });
+        }
+
+        // Variablen aus dem Zustand der vorherigen Kerze uebernehmen (fuer prev()).
+        self.variables = state.variables.clone();
+        self.begin_evaluation();
+
+        // Process all statements without breaking on first signal
+        for stmt in stmts {
+            self.eval_stmt(stmt, candles)?;
+        }
+        state.variables = self.variables.clone();
+
+        // Check trailing stop if configured (after all statements processed)
+        if let Some(trailing_pct) = self.current_intent.trailing_pct {
+            let current_price = candles.last().map(|c| c.close).unwrap_or(0.0);
+            if state.update_and_check_trailing(current_price, trailing_pct) {
+                self.current_intent.signal = Signal::Sell;
             }
         }
 
-        Ok(Signal::Hold)
+        Ok(self.current_intent.clone())
     }
 
     fn eval_stmt(
@@ -65,27 +157,70 @@ impl Evaluator {
             } => {
                 let cond_val = self.eval_expr(condition, candles)?;
                 if cond_val != 0.0 {
-                    for s in then_block {
-                        if let Some(sig) = self.eval_stmt(s, candles)? {
-                            return Ok(Some(sig));
-                        }
-                    }
+                    self.eval_block(then_block, candles)
                 } else if let Some(else_stmts) = else_block {
-                    for s in else_stmts {
-                        if let Some(sig) = self.eval_stmt(s, candles)? {
-                            return Ok(Some(sig));
-                        }
-                    }
+                    self.eval_block(else_stmts, candles)
+                } else {
+                    Ok(None)
                 }
+            }
+            Stmt::SignalBuy => {
+                self.current_intent.signal = Signal::Buy;
+                Ok(Some(Signal::Buy))
+            }
+            Stmt::SignalSell => {
+                self.current_intent.signal = Signal::Sell;
+                Ok(Some(Signal::Sell))
+            }
+            Stmt::StopLoss(expr) => {
+                let price = self.eval_expr(expr, candles)?;
+                self.current_intent.stop_loss = Some(price);
                 Ok(None)
             }
-            Stmt::SignalBuy => Ok(Some(Signal::Buy)),
-            Stmt::SignalSell => Ok(Some(Signal::Sell)),
+            Stmt::TakeProfit(expr) => {
+                let price = self.eval_expr(expr, candles)?;
+                self.current_intent.take_profit = Some(price);
+                Ok(None)
+            }
+            Stmt::StopLossPct(expr) => {
+                let pct = self.eval_expr(expr, candles)?;
+                check_pct("stop_loss_pct", pct)?;
+                self.current_intent.stop_loss_pct = Some(pct);
+                Ok(None)
+            }
+            Stmt::TakeProfitPct(expr) => {
+                let pct = self.eval_expr(expr, candles)?;
+                check_pct("take_profit_pct", pct)?;
+                self.current_intent.take_profit_pct = Some(pct);
+                Ok(None)
+            }
+            Stmt::TrailingStop(expr) => {
+                let pct = self.eval_expr(expr, candles)?;
+                self.current_intent.trailing_pct = Some(pct);
+                Ok(None)
+            }
             Stmt::ExprStmt(expr) => {
                 self.eval_expr(expr, candles)?;
                 Ok(None)
             }
         }
+    }
+
+    /// Führt alle Statements eines Blocks aus und liefert das erste Signal zurück.
+    /// Kein Abbruch beim ersten Signal, sonst gingen `stop_loss(..)`/`take_profit(..)`
+    /// hinter `buy()` im selben Block verloren.
+    fn eval_block(
+        &mut self,
+        block: &[Stmt],
+        candles: &[Candle],
+    ) -> Result<Option<Signal>, ScriptError> {
+        let mut first = None;
+        for s in block {
+            if let Some(sig) = self.eval_stmt(s, candles)? {
+                first.get_or_insert(sig);
+            }
+        }
+        Ok(first)
     }
 
     /// Evaluates an AST expression to a 64-bit floating point value.
@@ -193,7 +328,7 @@ impl Evaluator {
                 for c in candles {
                     res = indicator.update(c.close);
                 }
-                res.ok_or_else(|| ScriptError::EvalError {
+                res.ok_or_else(|| ScriptError::InsufficientHistory {
                     message: format!(
                         "insufficient candles ({}) for sma with period {period}",
                         candles.len()
@@ -207,7 +342,7 @@ impl Evaluator {
                 for c in candles {
                     res = indicator.update(c.close);
                 }
-                res.ok_or_else(|| ScriptError::EvalError {
+                res.ok_or_else(|| ScriptError::InsufficientHistory {
                     message: format!(
                         "insufficient candles ({}) for rsi with period {period}",
                         candles.len()
@@ -221,11 +356,121 @@ impl Evaluator {
                 for c in candles {
                     res = indicator.update(c.close);
                 }
-                res.ok_or_else(|| ScriptError::EvalError {
+                res.ok_or_else(|| ScriptError::InsufficientHistory {
                     message: format!(
                         "insufficient candles ({}) for ema with period {period}",
                         candles.len()
                     ),
+                })
+            }
+            // highest/lowest rechnen ueber die `period` Kerzen VOR der aktuellen
+            // (exklusive) — Donchian/Breakout-Semantik: der aktuelle Close kann
+            // sonst nie das Fenster-High uebersteigen (high >= close).
+            "highest" => {
+                let period = self.eval_period_arg("highest", args, candles)?;
+                if candles.len() < period + 1 {
+                    return Err(ScriptError::InsufficientHistory {
+                        message: format!(
+                            "insufficient candles ({}) for highest with period {period}",
+                            candles.len()
+                        ),
+                    });
+                }
+                let start = candles.len() - 1 - period;
+                let window = &candles[start..candles.len() - 1];
+                Ok(window
+                    .iter()
+                    .map(|c| c.high)
+                    .fold(f64::NEG_INFINITY, f64::max))
+            }
+            "lowest" => {
+                let period = self.eval_period_arg("lowest", args, candles)?;
+                if candles.len() < period + 1 {
+                    return Err(ScriptError::InsufficientHistory {
+                        message: format!(
+                            "insufficient candles ({}) for lowest with period {period}",
+                            candles.len()
+                        ),
+                    });
+                }
+                let start = candles.len() - 1 - period;
+                let window = &candles[start..candles.len() - 1];
+                Ok(window.iter().map(|c| c.low).fold(f64::INFINITY, f64::min))
+            }
+            "atr" => {
+                let period = self.eval_period_arg("atr", args, candles)?;
+                if candles.len() < period + 1 {
+                    return Err(ScriptError::InsufficientHistory {
+                        message: format!(
+                            "insufficient candles ({}) for atr with period {period}",
+                            candles.len()
+                        ),
+                    });
+                }
+                let start = candles.len() - period;
+                let mut sum = 0.0;
+                for i in start..candles.len() {
+                    let c = &candles[i];
+                    let prev_close = candles[i - 1].close;
+                    let tr = (c.high - c.low)
+                        .max((c.high - prev_close).abs())
+                        .max((c.low - prev_close).abs());
+                    sum += tr;
+                }
+                Ok(sum / period as f64)
+            }
+            // prev(expr): der Ausdruck auf der Kerzenreihe ohne die letzte Kerze.
+            // So laesst sich ein Kreuzen schreiben: a > b && prev(a) <= prev(b).
+            "prev" => {
+                if args.len() != 1 {
+                    return Err(ScriptError::EvalError {
+                        message: "prev() expects 1 argument".to_string(),
+                    });
+                }
+                if candles.len() < 2 {
+                    return Err(short(name, candles));
+                }
+                // Der Ausdruck wird mit den Variablen der vorherigen Kerze berechnet,
+                // sonst liefe `prev(x)` auf dem aktuellen Wert von `x`.
+                let current =
+                    std::mem::replace(&mut self.variables, self.previous_variables.clone());
+                let result = self.eval_expr(&args[0], &candles[..candles.len() - 1]);
+                self.variables = current;
+                result
+            }
+            "macd" | "macd_signal" | "macd_hist" => {
+                let a = self.eval_args(name, args, 3, candles)?;
+                let (fast, slow, sig) = (a[0] as usize, a[1] as usize, a[2] as usize);
+                let (line, signal, hist) =
+                    extra::macd(candles, fast, slow, sig).ok_or_else(|| short(name, candles))?;
+                Ok(match name {
+                    "macd" => line,
+                    "macd_signal" => signal,
+                    _ => hist,
+                })
+            }
+            "bb_lower" | "bb_mid" | "bb_upper" => {
+                let a = self.eval_args(name, args, 2, candles)?;
+                let (lo, mid, hi) = extra::bollinger(candles, a[0] as usize, a[1])
+                    .ok_or_else(|| short(name, candles))?;
+                Ok(match name {
+                    "bb_lower" => lo,
+                    "bb_mid" => mid,
+                    _ => hi,
+                })
+            }
+            "stoch_k" => {
+                let a = self.eval_args(name, args, 1, candles)?;
+                extra::stoch_k(candles, a[0] as usize).ok_or_else(|| short(name, candles))
+            }
+            "adx" | "plus_di" | "minus_di" => {
+                let a = self.eval_args(name, args, 1, candles)?;
+                let (adx, pdi, ndi) =
+                    extra::adx(candles, a[0] as usize).ok_or_else(|| short(name, candles))?;
+                Ok(match name {
+                    "adx" => adx,
+                    "plus_di" => pdi,
+                    _ => ndi,
                 })
             }
             _ => Err(ScriptError::UndefinedFunction {
@@ -233,177 +478,8 @@ impl Evaluator {
             }),
         }
     }
-
-    fn eval_period_arg(
-        &mut self,
-        func_name: &str,
-        args: &[Expr],
-        candles: &[Candle],
-    ) -> Result<usize, ScriptError> {
-        if args.len() != 1 {
-            return Err(ScriptError::EvalError {
-                message: format!("{func_name}() expects 1 argument"),
-            });
-        }
-        let period_f = self.eval_expr(&args[0], candles)?;
-        if period_f <= 0.0 || period_f.is_nan() {
-            return Err(ScriptError::EvalError {
-                message: format!("invalid period for {func_name}: {period_f}"),
-            });
-        }
-        Ok(period_f as usize)
-    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lexer::tokenize;
-    use crate::parser::parse;
-
-    fn helper_candles(prices: &[f64]) -> Vec<Candle> {
-        prices
-            .iter()
-            .enumerate()
-            .map(|(i, &p)| Candle::new(i as u64 * 1000, p, p + 1.0, p - 1.0, p, 100.0))
-            .collect()
-    }
-
-    #[test]
-    fn test_evaluate_rsi_buy_signal() {
-        // Arrange: create script and candle data where RSI < 30
-        let code = "if rsi(14) < 30 { buy() }";
-        let tokens = tokenize(code).expect("tokenization should succeed");
-        let stmts = parse(&tokens).expect("parsing should succeed");
-        let mut prices = vec![100.0; 5];
-        for i in 1..=15 {
-            prices.push(100.0 - (i as f64 * 4.0));
-        }
-        let candles = helper_candles(&prices);
-        let mut evaluator = Evaluator::new();
-
-        // Act
-        let signal = evaluator
-            .evaluate(&stmts, &candles)
-            .expect("evaluation should succeed");
-
-        // Assert
-        assert_eq!(signal, Signal::Buy);
-    }
-
-    #[test]
-    fn test_evaluate_sma_cross_signal() {
-        // Arrange
-        let code = "if sma(10) > sma(20) { buy() } else { sell() }";
-        let tokens = tokenize(code).expect("tokenization should succeed");
-        let stmts = parse(&tokens).expect("parsing should succeed");
-
-        let prices: Vec<f64> = (1..=30).map(|i| i as f64 * 10.0).collect();
-        let candles = helper_candles(&prices);
-        let mut evaluator = Evaluator::new();
-
-        // Act
-        let signal = evaluator
-            .evaluate(&stmts, &candles)
-            .expect("evaluation should succeed");
-
-        // Assert
-        assert_eq!(signal, Signal::Buy);
-    }
-
-    #[test]
-    fn test_evaluate_variable_binding() {
-        // Arrange
-        let code = "x = close(); if x > 50000 { sell() }";
-        let tokens = tokenize(code).expect("tokenization should succeed");
-        let stmts = parse(&tokens).expect("parsing should succeed");
-        let candles = vec![Candle::new(1000, 51000.0, 52000.0, 50000.0, 51000.0, 10.0)];
-        let mut evaluator = Evaluator::new();
-
-        // Act
-        let signal = evaluator
-            .evaluate(&stmts, &candles)
-            .expect("evaluation should succeed");
-
-        // Assert
-        assert_eq!(signal, Signal::Sell);
-        assert_eq!(evaluator.variables.get("x"), Some(&51000.0));
-    }
-
-    #[test]
-    fn test_evaluate_undefined_function() {
-        // Arrange
-        let code = "foo(1)";
-        let tokens = tokenize(code).expect("tokenization should succeed");
-        let stmts = parse(&tokens).expect("parsing should succeed");
-        let candles = helper_candles(&[100.0]);
-        let mut evaluator = Evaluator::new();
-
-        // Act
-        let result = evaluator.evaluate(&stmts, &candles);
-
-        // Assert
-        assert_eq!(
-            result,
-            Err(ScriptError::UndefinedFunction {
-                name: "foo".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn test_evaluate_division_by_zero() {
-        // Arrange
-        let code = "x = 10 / 0";
-        let tokens = tokenize(code).expect("tokenization should succeed");
-        let stmts = parse(&tokens).expect("parsing should succeed");
-        let candles = helper_candles(&[100.0]);
-        let mut evaluator = Evaluator::new();
-
-        // Act
-        let result = evaluator.evaluate(&stmts, &candles);
-
-        // Assert
-        assert!(matches!(result, Err(ScriptError::EvalError { .. })));
-    }
-
-    #[test]
-    fn test_evaluate_empty_candle_slice() {
-        // Arrange
-        let code = "buy()";
-        let tokens = tokenize(code).expect("tokenization should succeed");
-        let stmts = parse(&tokens).expect("parsing should succeed");
-        let candles: Vec<Candle> = vec![];
-        let mut evaluator = Evaluator::new();
-
-        // Act
-        let result = evaluator.evaluate(&stmts, &candles);
-
-        // Assert
-        assert!(matches!(result, Err(ScriptError::EvalError { .. })));
-    }
-
-    #[test]
-    fn test_evaluate_short_circuit_and_or() {
-        // Arrange: 0 && undefined_var should not fail with UndefinedVariable
-        let code1 = "if 0 && undefined_var { buy() }";
-        let code2 = "if 1 || undefined_var { buy() }";
-        let tokens1 = tokenize(code1).expect("tokenization should succeed");
-        let tokens2 = tokenize(code2).expect("tokenization should succeed");
-        let stmts1 = parse(&tokens1).expect("parsing should succeed");
-        let stmts2 = parse(&tokens2).expect("parsing should succeed");
-        let candles = helper_candles(&[100.0]);
-        let mut evaluator = Evaluator::new();
-
-        // Act & Assert
-        let sig1 = evaluator
-            .evaluate(&stmts1, &candles)
-            .expect("short circuit AND");
-        assert_eq!(sig1, Signal::Hold);
-
-        let sig2 = evaluator
-            .evaluate(&stmts2, &candles)
-            .expect("short circuit OR");
-        assert_eq!(sig2, Signal::Buy);
-    }
-}
+#[path = "evaluator_tests.rs"]
+mod tests;

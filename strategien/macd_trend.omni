@@ -1,0 +1,2 @@
+if macd_hist(12, 26, 9) > 0 && ema(50) > ema(200) { buy() }
+if macd_hist(12, 26, 9) < 0 { sell() }

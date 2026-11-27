@@ -1,0 +1,2 @@
+if ema(20) > ema(50) && rsi(14) < 35 { buy() }
+if ema(20) < ema(50) && rsi(14) > 65 { sell() }

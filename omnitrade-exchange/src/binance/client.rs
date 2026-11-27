@@ -6,18 +6,26 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::binance::connection::BinanceConnection;
+use crate::binance::margin::BinanceMarginClient;
+use crate::binance::rest::BinanceRestClient;
 use crate::binance::router::BinanceRouter;
+use crate::credentials::ApiCredentials;
 use crate::error::ExchangeError;
+use crate::trading::{Account, ExchangeTrading, OrderRequest};
 use crate::traits::{DepthUpdate, ExchangeInfo, ExchangeStream};
+use omnitrade_core::Order;
 
 const RAW_CHANNEL_CAPACITY: usize = 100;
 
 /// Unified Binance client for streaming market data via WebSocket connections.
+/// Optionally provides trading capabilities when credentials are configured.
 pub struct BinanceClient {
     connection: BinanceConnection,
     router: Option<BinanceRouter>,
     router_task: Option<JoinHandle<Result<(), ExchangeError>>>,
     is_connected: bool,
+    rest_client: Option<BinanceRestClient>,
+    margin_client: Option<BinanceMarginClient>,
 }
 
 impl BinanceClient {
@@ -32,6 +40,19 @@ impl BinanceClient {
             router: Some(router),
             router_task: None,
             is_connected: false,
+            rest_client: None,
+            margin_client: None,
+        }
+    }
+
+    /// Creates a `BinanceClient` whose market-data stream matches the network.
+    ///
+    /// Testnet-Orders mit Mainnet-Kursen zu handeln verfälscht Signale und
+    /// Risikoprüfung, deshalb nutzt das Testnet auch den Testnet-Stream.
+    pub fn for_network(network: crate::Network) -> Self {
+        match network {
+            crate::Network::Testnet => Self::with_base_url(BinanceConnection::TESTNET_BASE_URL),
+            crate::Network::Mainnet => Self::new(),
         }
     }
 
@@ -46,12 +67,58 @@ impl BinanceClient {
             router: Some(router),
             router_task: None,
             is_connected: false,
+            rest_client: None,
+            margin_client: None,
         }
     }
 
     /// Returns a reference to the internal `BinanceConnection`.
     pub fn connection(&self) -> &BinanceConnection {
         &self.connection
+    }
+
+    /// Enable trading capabilities by providing API credentials.
+    /// This initializes the REST client for order placement and account operations.
+    pub fn set_credentials(&mut self, credentials: ApiCredentials) -> Result<(), ExchangeError> {
+        let rest_client = BinanceRestClient::new(credentials)?;
+        self.rest_client = Some(rest_client);
+        Ok(())
+    }
+
+    /// Returns a reference to the trading facade if credentials are configured.
+    pub fn trading(&self) -> Result<&dyn ExchangeTrading, ExchangeError> {
+        self.rest_client
+            .as_ref()
+            .ok_or_else(|| {
+                ExchangeError::InvalidRequest(
+                    "Trading not enabled; set credentials first".to_string(),
+                )
+            })
+            .map(|c| c as &dyn ExchangeTrading)
+    }
+
+    /// Enable margin/futures trading capabilities (Testnet-only).
+    /// This initializes the margin REST client.
+    pub fn set_margin_credentials(
+        &mut self,
+        credentials: ApiCredentials,
+    ) -> Result<(), ExchangeError> {
+        let margin_client = BinanceMarginClient::new(credentials)?;
+        self.margin_client = Some(margin_client);
+        Ok(())
+    }
+
+    /// Returns a reference to the margin trading facade if credentials are configured.
+    /// Note: Margin/Futures trading is Testnet-only.
+    pub fn margin(&self) -> Result<&dyn ExchangeTrading, ExchangeError> {
+        self.margin_client
+            .as_ref()
+            .ok_or_else(|| {
+                ExchangeError::InvalidRequest(
+                    "Margin trading not enabled; set margin credentials first".to_string(),
+                )
+            })
+            .map(|c| c as &dyn ExchangeTrading)
     }
 }
 
@@ -149,8 +216,90 @@ impl ExchangeInfo for BinanceClient {
     }
 }
 
+#[async_trait]
+impl ExchangeTrading for BinanceClient {
+    async fn place_order(&self, req: &OrderRequest) -> Result<Order, ExchangeError> {
+        self.rest_client
+            .as_ref()
+            .ok_or_else(|| {
+                ExchangeError::InvalidRequest(
+                    "Trading not enabled; set credentials first".to_string(),
+                )
+            })?
+            .place_order(req)
+            .await
+    }
+
+    async fn cancel_order(&self, order_id: &str, symbol: &str) -> Result<(), ExchangeError> {
+        self.rest_client
+            .as_ref()
+            .ok_or_else(|| {
+                ExchangeError::InvalidRequest(
+                    "Trading not enabled; set credentials first".to_string(),
+                )
+            })?
+            .cancel_order(order_id, symbol)
+            .await
+    }
+
+    async fn get_open_orders(&self) -> Result<Vec<Order>, ExchangeError> {
+        self.rest_client
+            .as_ref()
+            .ok_or_else(|| {
+                ExchangeError::InvalidRequest(
+                    "Trading not enabled; set credentials first".to_string(),
+                )
+            })?
+            .get_open_orders()
+            .await
+    }
+
+    async fn get_order(
+        &self,
+        order_id: &str,
+        symbol: &str,
+    ) -> Result<Option<Order>, ExchangeError> {
+        self.rest_client
+            .as_ref()
+            .ok_or_else(|| {
+                ExchangeError::InvalidRequest(
+                    "Trading not enabled; set credentials first".to_string(),
+                )
+            })?
+            .get_order(order_id, symbol)
+            .await
+    }
+
+    async fn get_balance(&self) -> Result<Account, ExchangeError> {
+        self.rest_client
+            .as_ref()
+            .ok_or_else(|| {
+                ExchangeError::InvalidRequest(
+                    "Trading not enabled; set credentials first".to_string(),
+                )
+            })?
+            .get_balance()
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn for_network_selects_matching_stream_endpoint() {
+        use super::*;
+        let testnet = BinanceClient::for_network(crate::Network::Testnet);
+        assert_eq!(
+            testnet.connection().base_url(),
+            BinanceConnection::TESTNET_BASE_URL
+        );
+        let mainnet = BinanceClient::for_network(crate::Network::Mainnet);
+        assert_eq!(
+            mainnet.connection().base_url(),
+            BinanceConnection::DEFAULT_BASE_URL
+        );
+    }
+
     use super::*;
 
     #[test]

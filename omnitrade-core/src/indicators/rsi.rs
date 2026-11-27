@@ -231,7 +231,7 @@ mod tests {
         let prices = [50.0, 55.0, 48.0, 52.0, 47.0, 53.0, 46.0, 54.0, 45.0, 55.0];
         for p in prices {
             if let Some(val) = rsi.update(p) {
-                assert!(val >= 0.0 && val <= 100.0, "RSI out of bounds: {val}");
+                assert!((0.0..=100.0).contains(&val), "RSI out of bounds: {val}");
             }
         }
     }

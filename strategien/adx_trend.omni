@@ -1,0 +1,2 @@
+if adx(14) > 25 && plus_di(14) > minus_di(14) { buy() }
+if plus_di(14) < minus_di(14) { sell() }

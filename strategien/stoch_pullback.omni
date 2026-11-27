@@ -1,0 +1,2 @@
+if ema(50) > ema(200) && stoch_k(14) < 20 { buy() }
+if stoch_k(14) > 80 { sell() }

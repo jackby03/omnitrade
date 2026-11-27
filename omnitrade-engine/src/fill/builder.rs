@@ -3,7 +3,7 @@
 use omnitrade_core::Side;
 
 use crate::error::EngineError;
-use crate::fill::OrderFill;
+use crate::fill::{FillType, OrderFill};
 
 /// Builder for constructing [`OrderFill`] instances with field validation.
 #[derive(Debug, Clone)]
@@ -17,6 +17,7 @@ pub struct OrderFillBuilder {
     fee_asset: String,
     timestamp_ms: u64,
     is_maker: bool,
+    fill_type: FillType,
 }
 
 impl OrderFillBuilder {
@@ -32,6 +33,7 @@ impl OrderFillBuilder {
             fee_asset: String::new(),
             timestamp_ms: 0,
             is_maker: false,
+            fill_type: FillType::Regular,
         }
     }
 
@@ -84,12 +86,18 @@ impl OrderFillBuilder {
         self
     }
 
+    /// Sets the fill type (Regular, StopLoss, TakeProfit, TrailingStop).
+    pub fn fill_type(mut self, fill_type: FillType) -> Self {
+        self.fill_type = fill_type;
+        self
+    }
+
     /// Validates and builds the [`OrderFill`].
     ///
     /// # Errors
     /// Returns [`EngineError::InvalidFieldValue`] if field values fail validation.
     pub fn build(self) -> Result<OrderFill, EngineError> {
-        OrderFill::try_new(
+        let mut fill = OrderFill::try_new(
             self.order_id,
             self.symbol,
             self.side,
@@ -99,7 +107,9 @@ impl OrderFillBuilder {
             self.fee_asset,
             self.timestamp_ms,
             self.is_maker,
-        )
+        )?;
+        fill.fill_type = self.fill_type;
+        Ok(fill)
     }
 }
 

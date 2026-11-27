@@ -1,0 +1,5 @@
+trailing_stop(0.03)
+stop_loss_pct(0.03)
+take_profit_pct(0.05)
+if rsi(14) < 30 { buy() }
+if rsi(14) > 60 { sell() }

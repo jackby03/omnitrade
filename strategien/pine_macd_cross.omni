@@ -1,0 +1,2 @@
+if macd(12, 26, 9) > macd_signal(12, 26, 9) && prev(macd(12, 26, 9)) <= prev(macd_signal(12, 26, 9)) { stop_loss_pct(0.03); take_profit_pct(0.06); buy() }
+if macd(12, 26, 9) < macd_signal(12, 26, 9) && prev(macd(12, 26, 9)) >= prev(macd_signal(12, 26, 9)) { stop_loss_pct(0.03); take_profit_pct(0.06); sell() }

@@ -1,0 +1,2 @@
+if close() > highest(20) && prev(close()) <= prev(highest(20)) { stop_loss_pct(0.05); take_profit_pct(0.1); buy() }
+if close() < lowest(20) && prev(close()) >= prev(lowest(20)) { stop_loss_pct(0.05); take_profit_pct(0.1); sell() }

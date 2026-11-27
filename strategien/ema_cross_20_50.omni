@@ -1,0 +1,1 @@
+if ema(20) > ema(50) { buy() } else { sell() }

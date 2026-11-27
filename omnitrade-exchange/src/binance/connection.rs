@@ -33,6 +33,9 @@ impl BinanceConnection {
     /// Default Binance WebSocket stream endpoint base URL.
     pub const DEFAULT_BASE_URL: &'static str = "wss://stream.binance.com:9443/ws";
 
+    /// Binance Spot Testnet WebSocket stream endpoint base URL.
+    pub const TESTNET_BASE_URL: &'static str = "wss://stream.testnet.binance.vision/ws";
+
     /// Creates a new `BinanceConnection` with default base URL.
     pub fn new(raw_tx: mpsc::Sender<String>) -> Self {
         Self {

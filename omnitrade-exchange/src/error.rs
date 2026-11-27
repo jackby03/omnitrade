@@ -47,6 +47,30 @@ pub enum ExchangeError {
     /// Error propagated from `omnitrade-core`.
     #[error(transparent)]
     Core(#[from] CoreError),
+
+    /// Keyring operation failed (credential storage/retrieval).
+    #[error("keyring error: {0}")]
+    KeyringError(String),
+
+    /// Invalid API credentials (empty key/secret or validation failure).
+    #[error("invalid credentials: {0}")]
+    InvalidCredentials(String),
+
+    /// Network mismatch (e.g., loading mainnet credentials as testnet).
+    #[error("network mismatch: {0}")]
+    NetworkMismatch(String),
+
+    /// Invalid order request (missing required fields).
+    #[error("invalid order request: {0}")]
+    InvalidRequest(String),
+
+    /// API returned an error response.
+    #[error("API error: {0}")]
+    ApiError(String),
+
+    /// Insufficient balance or other account constraint violated.
+    #[error("account error: {0}")]
+    AccountError(String),
 }
 
 #[cfg(test)]

@@ -1,0 +1,2 @@
+if close() > sma(200) && ema(50) > ema(200) { buy() }
+if close() < sma(200) && ema(50) < ema(200) { sell() }

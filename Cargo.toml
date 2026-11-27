@@ -6,7 +6,7 @@ members = [
     "omnitrade-engine",
     "omnitrade-script",
     "omnitrade-cli",
-    "omnitrade-ui",
+    "omnitrade-ui", "omnitrade-risk",
 ]
 
 [workspace.package]
@@ -14,3 +14,20 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 rust-version = "1.75"
 repository = "https://github.com/jackby03/omnitrade"
+
+[workspace.dependencies]
+omnitrade-core = { path = "omnitrade-core" }
+omnitrade-engine = { path = "omnitrade-engine" }
+omnitrade-exchange = { path = "omnitrade-exchange" }
+omnitrade-risk = { path = "omnitrade-risk" }
+omnitrade-script = { path = "omnitrade-script" }
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.11", features = ["json"] }
+hmac = "0.12"
+sha2 = "0.10"
+keyring = "2"
+hex = "0.4"
+urlencoding = "2"

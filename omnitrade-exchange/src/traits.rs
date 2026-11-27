@@ -15,15 +15,27 @@ pub struct DepthUpdate {
     pub bids: Vec<(f64, f64)>,
     /// Vector of ask price levels: `(price, quantity)`.
     pub asks: Vec<(f64, f64)>,
+    /// `true`, wenn die Nachricht das vollständige Buch ist (Snapshot, z. B. nach einem
+    /// Wiederverbinden). Ein Snapshot ersetzt den Bestand, ein Delta wird eingearbeitet.
+    pub snapshot: bool,
 }
 
 impl DepthUpdate {
-    /// Creates a new `DepthUpdate` instance.
+    /// Creates a new delta `DepthUpdate` instance.
     pub fn new(timestamp_ms: u64, bids: Vec<(f64, f64)>, asks: Vec<(f64, f64)>) -> Self {
         Self {
             timestamp_ms,
             bids,
             asks,
+            snapshot: false,
+        }
+    }
+
+    /// Creates a full-book snapshot that replaces the previous book.
+    pub fn snapshot(timestamp_ms: u64, bids: Vec<(f64, f64)>, asks: Vec<(f64, f64)>) -> Self {
+        Self {
+            snapshot: true,
+            ..Self::new(timestamp_ms, bids, asks)
         }
     }
 }
@@ -47,6 +59,20 @@ pub trait ExchangeStream: Send + Sync {
         symbol: &str,
     ) -> Result<mpsc::Receiver<DepthUpdate>, ExchangeError>;
 
+    /// Bestaetigte Kerzen per REST — Rueckfallweg, wenn der WebSocket still bleibt.
+    ///
+    /// Boersen ohne oeffentlichen Kerzenabruf lassen die Vorgabe stehen; der Live-Loop
+    /// meldet den Fehlschlag dann im Log, statt still weiterzulaufen.
+    async fn recent_candles(
+        &self,
+        _symbol: &str,
+        _interval: &str,
+        _limit: usize,
+    ) -> Result<Vec<Candle>, ExchangeError> {
+        Err(ExchangeError::InvalidRequest(
+            "diese Boerse liefert keine Kerzen per REST".to_string(),
+        ))
+    }
     /// Gracefully disconnects from the exchange feed.
     async fn disconnect(&mut self) -> Result<(), ExchangeError>;
 }

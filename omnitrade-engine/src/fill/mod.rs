@@ -7,6 +7,19 @@ use omnitrade_core::Side;
 
 use crate::error::EngineError;
 
+/// Reason for fill execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FillType {
+    /// Regular market or limit order execution.
+    Regular,
+    /// Stop-Loss order triggered.
+    StopLoss,
+    /// Take-Profit order triggered.
+    TakeProfit,
+    /// Trailing-Stop triggered.
+    TrailingStop,
+}
+
 /// Represents a completed (or partial) order execution event.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderFill {
@@ -28,6 +41,8 @@ pub struct OrderFill {
     pub timestamp_ms: u64,
     /// `true` if order was liquidity maker, `false` if taker.
     pub is_maker: bool,
+    /// Reason for the fill (Regular, StopLoss, TakeProfit, TrailingStop).
+    pub fill_type: FillType,
 }
 
 impl OrderFill {
@@ -56,6 +71,7 @@ impl OrderFill {
             fee_asset,
             timestamp_ms,
             is_maker,
+            fill_type: FillType::Regular,
         }
     }
 
@@ -111,6 +127,7 @@ impl OrderFill {
             fee_asset,
             timestamp_ms,
             is_maker,
+            fill_type: FillType::Regular,
         })
     }
 

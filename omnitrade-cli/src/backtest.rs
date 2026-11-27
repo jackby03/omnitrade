@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use omnitrade_core::{Candle, Order, OrderStatus, OrderType, Side, Tick};
 use omnitrade_engine::{AccountState, FeeSchedule, MatchingEngine, SlippageModel};
-use omnitrade_script::{parse, tokenize, Evaluator, Signal};
+use omnitrade_script::{parse, tokenize, Evaluator, OrderIntent, ScriptError, Signal};
 use serde::Deserialize;
 
 /// Configuration options for running a backtest simulation.
@@ -27,16 +27,23 @@ pub struct BacktestConfig {
     pub symbol: String,
     /// Order sizing quantity (defaults to 1.0).
     pub quantity: f64,
+    /// Erlaubt Kurzpositionen: ein `sell()` bei flacher Position eroeffnet einen
+    /// Short. Standard ist aus (long-only), wie der Live-Lauf ohne `--allow-shorts`.
+    pub allow_shorts: bool,
 }
 
 impl BacktestConfig {
     /// Constructs a new `BacktestConfig` with default symbol and quantity.
+    ///
+    /// Kurzpositionen sind nur mit gesetzter Umgebungsvariable `OMNI_ALLOW_SHORTS`
+    /// aktiv; ohne sie bleibt der Lauf long-only (Live-Standard).
     pub fn new(
         script_path: PathBuf,
         data_path: PathBuf,
         initial_balance: f64,
         fee_rate: f64,
         slippage_bps: f64,
+        quantity: f64,
     ) -> Self {
         Self {
             script_path,
@@ -45,7 +52,8 @@ impl BacktestConfig {
             fee_rate,
             slippage_bps,
             symbol: "BTCUSDT".to_string(),
-            quantity: 1.0,
+            quantity,
+            allow_shorts: std::env::var("OMNI_ALLOW_SHORTS").is_ok(),
         }
     }
 }
@@ -116,6 +124,7 @@ fn execute_order(
         status: OrderStatus::New,
         created_at_ms: c.timestamp_ms,
         updated_at_ms: c.timestamp_ms,
+        trailing_highest_price: None,
     };
     let tick = Tick::new(c.timestamp_ms, c.close, qty, false);
     let fills = eng.process_tick(&tick, &mut vec![order]);
@@ -129,21 +138,186 @@ fn execute_order(
 
 fn close_pos(
     acc: &mut AccountState,
-    eng: &mut MatchingEngine,
-    id: u64,
     sym: &str,
-    c: &Candle,
+    side: Side,
+    px: f64,
+    fee_rate: f64,
 ) -> Result<f64, Box<dyn Error>> {
-    if let Some(pos) = acc.get_position(sym).cloned() {
-        let fill_price = execute_order(acc, eng, id, sym, pos.side.opposite(), pos.quantity, c)?;
-        let trade_pnl = match pos.side {
-            Side::Buy => (fill_price - pos.entry_price) * pos.quantity,
-            Side::Sell => (pos.entry_price - fill_price) * pos.quantity,
-        };
-        Ok(trade_pnl)
-    } else {
-        Ok(0.0)
+    let pnl = acc.close_position_at(sym, side, px, fee_rate)?;
+    if std::env::var("OMNI_TRACE").is_ok() {
+        eprintln!(
+            "TRACE close {side:?} @{px:.2} pnl={pnl:9.2} balance={:.2}",
+            acc.balance
+        );
     }
+    Ok(pnl)
+}
+
+/// Closes a position at an explicit price tag (STOP/TP/Trailing-Ausfuehrung).
+fn close_at(
+    acc: &mut AccountState,
+    sym: &str,
+    side: Side,
+    price: f64,
+    fee_rate: f64,
+    tag: &str,
+) -> Result<f64, Box<dyn Error>> {
+    let pnl = acc.close_position_at(sym, side, price, fee_rate)?;
+    if std::env::var("OMNI_TRACE").is_ok() {
+        eprintln!(
+            "TRACE close {side:?} via {tag} @{price:.2} pnl={pnl:9.2} balance={:.2}",
+            acc.balance
+        );
+    }
+    Ok(pnl)
+}
+
+/// Einstiegskurs der offenen Position, sonst der Schlusskurs der Kerze.
+fn entry_price(acc: &AccountState, sym: &str, side: Side, c: &Candle) -> f64 {
+    acc.get_position(sym, side)
+        .map(|pos| pos.entry_price)
+        .unwrap_or(c.close)
+}
+
+/// Schutz-Niveaus einer neu eroeffneten Long-Position: Stop, Take-Profit,
+/// Trailing-Prozent und das Hoch fuer den Trailing-Stop. Der Trailing-Stop ist
+/// ab der Eroeffnung scharf (`pct` unter dem Einstieg), nicht erst nach einem
+/// hoeheren Hoch.
+/// Stop-, Take-Profit-, Trailing-Level und Einstiegskurs einer Position.
+type Levels = (Option<f64>, Option<f64>, Option<f64>, f64);
+
+/// Absolute Kurse sind seitenabhaengig: Long braucht Stop unter und Take-Profit
+/// ueber dem Einstieg. Liegt ein Kurs auf der falschen Seite, bricht der Backtest
+/// ab, statt den Auftrag sofort oder mit falschem Ergebnis auszufuehren.
+fn long_levels(intent: &OrderIntent, entry: f64) -> Result<Levels, Box<dyn Error>> {
+    // Prozentwerte schlagen absolute Kurse auf derselben Seite. Long: Stop unter, TP ueber dem Einstieg.
+    let mut stop = match intent.stop_loss_pct {
+        Some(p) => Some(entry * (1.0 - p)),
+        None => intent.stop_loss,
+    };
+    if let Some(pct) = intent.trailing_pct {
+        let armed = entry * (1.0 - pct);
+        stop = Some(stop.map_or(armed, |s| s.max(armed)));
+    }
+    let take = match intent.take_profit_pct {
+        Some(p) => Some(entry * (1.0 + p)),
+        None => intent.take_profit,
+    };
+    if let Some(sl) = intent.stop_loss {
+        if intent.stop_loss_pct.is_none() && sl >= entry {
+            return Err(format!(
+                "stop_loss({sl:.4}) liegt bei Long-Einstieg {entry:.4} nicht unter dem Einstieg - stop_loss_pct oder einen Kurs unter dem Einstieg verwenden"
+            )
+            .into());
+        }
+    }
+    if let Some(tp) = intent.take_profit {
+        if intent.take_profit_pct.is_none() && tp <= entry {
+            return Err(format!(
+                "take_profit({tp:.4}) liegt bei Long-Einstieg {entry:.4} nicht ueber dem Einstieg - take_profit_pct oder einen Kurs ueber dem Einstieg verwenden"
+            )
+            .into());
+        }
+    }
+    Ok((stop, take, intent.trailing_pct, entry))
+}
+
+/// Spiegelbild von `long_levels` fuer Shorts: Trailing-Stop `pct` ueber dem Einstieg.
+/// Spiegelbild von `long_levels` fuer Shorts: Stop ueber, Take-Profit unter dem Einstieg.
+fn short_levels(intent: &OrderIntent, entry: f64) -> Result<Levels, Box<dyn Error>> {
+    // Stop ueber dem Einstieg (Verlustseite), Take-Profit unter dem Einstieg (Gewinnseite).
+    let mut stop = match intent.stop_loss_pct {
+        Some(p) => Some(entry * (1.0 + p)),
+        None => intent.stop_loss,
+    };
+    if let Some(pct) = intent.trailing_pct {
+        let armed = entry * (1.0 + pct);
+        stop = Some(stop.map_or(armed, |s| s.min(armed)));
+    }
+    let take = match intent.take_profit_pct {
+        Some(p) => Some(entry * (1.0 - p)),
+        None => intent.take_profit,
+    };
+    if let Some(sl) = intent.stop_loss {
+        if intent.stop_loss_pct.is_none() && sl <= entry {
+            return Err(format!(
+                "stop_loss({sl:.4}) liegt bei Short-Einstieg {entry:.4} nicht ueber dem Einstieg - stop_loss_pct oder einen Kurs ueber dem Einstieg verwenden"
+            )
+            .into());
+        }
+    }
+    if let Some(tp) = intent.take_profit {
+        if intent.take_profit_pct.is_none() && tp >= entry {
+            return Err(format!(
+                "take_profit({tp:.4}) liegt bei Short-Einstieg {entry:.4} nicht unter dem Einstieg - take_profit_pct oder einen Kurs unter dem Einstieg verwenden"
+            )
+            .into());
+        }
+    }
+    Ok((stop, take, intent.trailing_pct, entry))
+}
+
+/// Ausloesung eines Long-Schutzes auf einer Kerze. Liefert Kurs, Art und ob der
+/// Stop als Market-Order (mit Slippage) ausgefuehrt wird.
+///
+/// Eine Luecke wird zum Eroeffnungskurs gefuellt, wenn er schon jenseits des
+/// Niveaus liegt. Innerhalb der Kerze gilt der Stop vor dem Take-Profit, weil die
+/// Reihenfolge der Kursbewegung in den Kerzendaten nicht bekannt ist.
+fn long_exit(
+    c: &Candle,
+    stop: Option<f64>,
+    take: Option<f64>,
+) -> Option<(f64, &'static str, bool)> {
+    if let Some(sl) = stop {
+        if c.open <= sl {
+            return Some((c.open, "STOP", true));
+        }
+    }
+    if let Some(tp) = take {
+        if c.open >= tp {
+            return Some((c.open, "TP", false));
+        }
+    }
+    if let Some(sl) = stop {
+        if c.low <= sl {
+            return Some((sl, "STOP", true));
+        }
+    }
+    if let Some(tp) = take {
+        if c.high >= tp {
+            return Some((tp, "TP", false));
+        }
+    }
+    None
+}
+
+/// Spiegelbild von `long_exit` fuer Shorts.
+fn short_exit(
+    c: &Candle,
+    stop: Option<f64>,
+    take: Option<f64>,
+) -> Option<(f64, &'static str, bool)> {
+    if let Some(sl) = stop {
+        if c.open >= sl {
+            return Some((c.open, "STOP", true));
+        }
+    }
+    if let Some(tp) = take {
+        if c.open <= tp {
+            return Some((c.open, "TP", false));
+        }
+    }
+    if let Some(sl) = stop {
+        if c.high >= sl {
+            return Some((sl, "STOP", true));
+        }
+    }
+    if let Some(tp) = take {
+        if c.low <= tp {
+            return Some((tp, "TP", false));
+        }
+    }
+    None
 }
 
 /// Executes a strategy backtest against historical market candle data.
@@ -168,6 +342,10 @@ fn run_backtest_with_script_and_candles(
     let (mut order_id, mut total_trades, mut wins) = (1u64, 0usize, 0usize);
     let (mut peak_equity, mut max_dd) = (cfg.initial_balance, 0.0f64);
     let mut eval = Evaluator::new();
+    // Standard long-only, wie der Live-Lauf ohne --allow-shorts: sell() schliesst
+    // nur die Long-Position, eroeffnet aber keine Short-Gegenposition. Shorts nur
+    // mit cfg.allow_shorts (Umgebungsvariable OMNI_ALLOW_SHORTS).
+    let long_only = !cfg.allow_shorts;
     let sym = if cfg.symbol.is_empty() {
         "BTCUSDT"
     } else {
@@ -179,35 +357,140 @@ fn run_backtest_with_script_and_candles(
         cfg.quantity
     };
 
+    let mut long_stop: Option<f64> = None;
+    let mut long_take: Option<f64> = None;
+    let mut long_trail: Option<f64> = None;
+    let mut long_trail_hi: f64 = f64::NEG_INFINITY;
+    let mut short_stop: Option<f64> = None;
+    let mut short_take: Option<f64> = None;
+    let mut short_trail: Option<f64> = None;
+    let mut short_trail_lo: f64 = f64::INFINITY;
+
+    let slip = SlippageModel::new(cfg.slippage_bps)?;
+
     for i in 0..candles.len() {
         let c = &candles[i];
-        let _ = acc.update_unrealized_pnl(sym, c.close);
-        let sig = eval.evaluate(&stmts, &candles[0..=i])?;
-        let pos_side = acc.get_position(sym).map(|p| p.side);
+        acc.update_unrealized_pnl(sym, Side::Buy, c.close).ok();
+        acc.update_unrealized_pnl(sym, Side::Sell, c.close).ok();
+        // Indikatoren brauchen Anlaufzeit: zu wenig Kerzen heisst "noch kein Signal".
+        // Jeder andere Auswertungsfehler ist ein Skriptfehler und bricht den Lauf ab.
+        let sig = match eval.evaluate(&stmts, &candles[0..=i]) {
+            Ok(sig) => sig,
+            Err(ScriptError::InsufficientHistory { .. }) => Signal::Hold,
+            Err(e) => return Err(e.into()),
+        };
 
-        match (sig, pos_side) {
-            (Signal::Buy, Some(Side::Sell)) | (Signal::Sell, Some(Side::Buy)) => {
-                let pnl = close_pos(&mut acc, &mut eng, order_id, sym, c)?;
+        let mut has_long = acc.get_position(sym, Side::Buy).is_some();
+        let mut has_short = acc.get_position(sym, Side::Sell).is_some();
+
+        // --- Schutz offener Positionen zuerst: ein Stop gewinnt gegen ein Signal
+        // derselben Kerze. Der Schutz gilt auch dann, wenn das Skript auf dieser
+        // Kerze keinen Wert liefert. Die Pruefung laeuft mit den Niveaus vor dieser
+        // Kerze; der Trailing-Stop rueckt erst danach mit dem Hoch/Tief der Kerze nach.
+        if has_long {
+            if let Some((px, tag, market)) = long_exit(c, long_stop, long_take) {
+                let fill = if market {
+                    slip.apply_slippage(px, Side::Sell)
+                } else {
+                    px
+                };
+                let pnl = close_at(&mut acc, sym, Side::Buy, fill, cfg.fee_rate, tag)?;
                 order_id += 1;
                 total_trades += 1;
                 if pnl > 0.0 {
                     wins += 1;
                 }
-                let new_side = if sig == Signal::Buy {
-                    Side::Buy
-                } else {
-                    Side::Sell
-                };
-                execute_order(&mut acc, &mut eng, order_id, sym, new_side, qty, c)?;
-                order_id += 1;
+                (long_stop, long_take, long_trail) = (None, None, None);
+                long_trail_hi = f64::NEG_INFINITY;
+            } else if let Some(pct) = long_trail {
+                if c.high > long_trail_hi {
+                    long_trail_hi = c.high;
+                    let ns = long_trail_hi * (1.0 - pct);
+                    if long_stop.map_or(true, |cur| ns > cur) {
+                        long_stop = Some(ns);
+                    }
+                }
             }
-            (Signal::Buy, None) => {
+        }
+        if has_short {
+            if let Some((px, tag, market)) = short_exit(c, short_stop, short_take) {
+                let fill = if market {
+                    slip.apply_slippage(px, Side::Buy)
+                } else {
+                    px
+                };
+                let pnl = close_at(&mut acc, sym, Side::Sell, fill, cfg.fee_rate, tag)?;
+                order_id += 1;
+                total_trades += 1;
+                if pnl > 0.0 {
+                    wins += 1;
+                }
+                (short_stop, short_take, short_trail) = (None, None, None);
+                short_trail_lo = f64::INFINITY;
+            } else if let Some(pct) = short_trail {
+                if c.low < short_trail_lo {
+                    short_trail_lo = c.low;
+                    let ns = short_trail_lo * (1.0 + pct);
+                    if short_stop.map_or(true, |cur| ns < cur) {
+                        short_stop = Some(ns);
+                    }
+                }
+            }
+        }
+
+        has_long = acc.get_position(sym, Side::Buy).is_some();
+        has_short = acc.get_position(sym, Side::Sell).is_some();
+
+        match sig {
+            Signal::Buy if has_short => {
+                let px = slip.apply_slippage(c.close, Side::Buy);
+                let pnl = close_pos(&mut acc, sym, Side::Sell, px, cfg.fee_rate)?;
+                order_id += 1;
+                total_trades += 1;
+                if pnl > 0.0 {
+                    wins += 1;
+                }
+                (short_stop, short_take, short_trail) = (None, None, None);
+                short_trail_lo = f64::INFINITY;
+                if !has_long {
+                    execute_order(&mut acc, &mut eng, order_id, sym, Side::Buy, qty, c)?;
+                    order_id += 1;
+                    let entry = entry_price(&acc, sym, Side::Buy, c);
+                    (long_stop, long_take, long_trail, long_trail_hi) =
+                        long_levels(eval.current_intent(), entry)?;
+                }
+            }
+            Signal::Sell if has_long => {
+                let px = slip.apply_slippage(c.close, Side::Sell);
+                let pnl = close_pos(&mut acc, sym, Side::Buy, px, cfg.fee_rate)?;
+                order_id += 1;
+                total_trades += 1;
+                if pnl > 0.0 {
+                    wins += 1;
+                }
+                (long_stop, long_take, long_trail) = (None, None, None);
+                long_trail_hi = f64::NEG_INFINITY;
+                if !has_short && !long_only {
+                    execute_order(&mut acc, &mut eng, order_id, sym, Side::Sell, qty, c)?;
+                    order_id += 1;
+                    let entry = entry_price(&acc, sym, Side::Sell, c);
+                    (short_stop, short_take, short_trail, short_trail_lo) =
+                        short_levels(eval.current_intent(), entry)?;
+                }
+            }
+            Signal::Buy if !has_long => {
                 execute_order(&mut acc, &mut eng, order_id, sym, Side::Buy, qty, c)?;
                 order_id += 1;
+                let entry = entry_price(&acc, sym, Side::Buy, c);
+                (long_stop, long_take, long_trail, long_trail_hi) =
+                    long_levels(eval.current_intent(), entry)?;
             }
-            (Signal::Sell, None) => {
+            Signal::Sell if !has_short && !long_only => {
                 execute_order(&mut acc, &mut eng, order_id, sym, Side::Sell, qty, c)?;
                 order_id += 1;
+                let entry = entry_price(&acc, sym, Side::Sell, c);
+                (short_stop, short_take, short_trail, short_trail_lo) =
+                    short_levels(eval.current_intent(), entry)?;
             }
             _ => {}
         }
@@ -220,9 +503,19 @@ fn run_backtest_with_script_and_candles(
         }
     }
 
+    // Offene Positionen zum letzten Schlusskurs glattstellen, mit Exit-Slippage.
     if let Some(c) = candles.last() {
-        if acc.get_position(sym).is_some() {
-            let pnl = close_pos(&mut acc, &mut eng, order_id, sym, c)?;
+        if acc.get_position(sym, Side::Buy).is_some() {
+            let px = slip.apply_slippage(c.close, Side::Sell);
+            let pnl = close_pos(&mut acc, sym, Side::Buy, px, cfg.fee_rate)?;
+            total_trades += 1;
+            if pnl > 0.0 {
+                wins += 1;
+            }
+        }
+        if acc.get_position(sym, Side::Sell).is_some() {
+            let px = slip.apply_slippage(c.close, Side::Buy);
+            let pnl = close_pos(&mut acc, sym, Side::Sell, px, cfg.fee_rate)?;
             total_trades += 1;
             if pnl > 0.0 {
                 wins += 1;
@@ -245,122 +538,9 @@ fn run_backtest_with_script_and_candles(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "backtest_tests.rs"]
+mod tests;
 
-    fn sample_csv_data() -> &'static str {
-        "timestamp_ms,open,high,low,close,volume\n\
-         1000,100.0,105.0,95.0,102.0,500.0\n\
-         2000,102.0,108.0,100.0,106.0,600.0\n\
-         3000,106.0,110.0,104.0,109.0,700.0\n\
-         4000,109.0,115.0,108.0,112.0,800.0\n\
-         5000,112.0,120.0,110.0,118.0,900.0"
-    }
-
-    fn helper_rising_candles() -> Vec<Candle> {
-        vec![
-            Candle::new(1000, 100.0, 105.0, 95.0, 100.0, 500.0),
-            Candle::new(2000, 110.0, 115.0, 105.0, 110.0, 600.0),
-            Candle::new(3000, 120.0, 125.0, 115.0, 120.0, 700.0),
-            Candle::new(4000, 130.0, 135.0, 125.0, 130.0, 800.0),
-            Candle::new(5000, 140.0, 145.0, 135.0, 140.0, 900.0),
-        ]
-    }
-
-    #[test]
-    fn test_csv_5_rows_parses_into_5_candle_structs() {
-        // Arrange & Act
-        let candles = load_candles_from_reader(sample_csv_data().as_bytes())
-            .expect("CSV reading and parsing should succeed");
-
-        // Assert
-        assert_eq!(candles.len(), 5);
-        assert_eq!(candles[0].timestamp_ms, 1000);
-        assert!((candles[0].open - 100.0).abs() < f64::EPSILON);
-        assert!((candles[4].close - 118.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_malformed_csv_row_returns_error() {
-        // Arrange
-        let csv_data =
-            "timestamp_ms,open,high,low,close,volume\n1000,100.0,INVALID,95.0,102.0,500.0";
-
-        // Act & Assert
-        assert!(load_candles_from_reader(csv_data.as_bytes()).is_err());
-    }
-
-    #[test]
-    fn test_backtest_always_buy_script_rising_prices_positive_pnl() {
-        // Arrange
-        let script = "if close() > 0 { buy() }";
-        let candles = helper_rising_candles();
-        let config = BacktestConfig::new(
-            PathBuf::from("dummy.omni"),
-            PathBuf::from("dummy.csv"),
-            10000.0,
-            0.001,
-            5.0,
-        );
-
-        // Act
-        let result = run_backtest_with_script_and_candles(script, &candles, &config)
-            .expect("backtest run should succeed");
-
-        // Assert
-        assert!(result.total_pnl > 0.0);
-        assert_eq!(result.total_trades, 1);
-        assert!((result.win_rate - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_backtest_always_sell_script_rising_prices_negative_pnl() {
-        // Arrange
-        let script = "if close() > 0 { sell() }";
-        let candles = helper_rising_candles();
-        let config = BacktestConfig::new(
-            PathBuf::from("dummy.omni"),
-            PathBuf::from("dummy.csv"),
-            10000.0,
-            0.001,
-            5.0,
-        );
-
-        // Act
-        let result = run_backtest_with_script_and_candles(script, &candles, &config)
-            .expect("backtest run should succeed");
-
-        // Assert
-        assert!(result.total_pnl < 0.0);
-        assert_eq!(result.total_trades, 1);
-        assert!((result.win_rate - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_win_rate_computed_as_wins_divided_by_total_trades() {
-        // Arrange
-        let script = "if close() < 105 { buy() } else { if close() > 115 { sell() } }";
-        let candles = vec![
-            Candle::new(1000, 100.0, 105.0, 95.0, 100.0, 100.0),
-            Candle::new(2000, 120.0, 125.0, 115.0, 120.0, 100.0),
-            Candle::new(3000, 130.0, 135.0, 125.0, 130.0, 100.0),
-            Candle::new(4000, 100.0, 105.0, 95.0, 100.0, 100.0),
-            Candle::new(5000, 110.0, 115.0, 105.0, 110.0, 100.0),
-        ];
-        let config = BacktestConfig::new(
-            PathBuf::from("dummy.omni"),
-            PathBuf::from("dummy.csv"),
-            10000.0,
-            0.0,
-            0.0,
-        );
-
-        // Act
-        let result = run_backtest_with_script_and_candles(script, &candles, &config)
-            .expect("backtest should succeed");
-
-        // Assert
-        assert_eq!(result.total_trades, 3);
-        assert!((result.win_rate - 1.0).abs() < f64::EPSILON);
-    }
-}
+#[cfg(test)]
+#[path = "backtest_schutz_tests.rs"]
+mod schutz_tests;
